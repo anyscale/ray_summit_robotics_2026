@@ -146,7 +146,7 @@ Match the structure of `08_jepa_world_model_pretraining.ipynb` and
   architecture diagram already in `closed_loop_vla_sim.ipynb` cell 2).
 - Honest framing about scope: these are smoke-scale runs validating the
   *infrastructure*, not optimizing task success (the VLA half deliberately has
-  an embodiment mismatch — see §9).
+  a train/eval mismatch — see §9).
 
 ---
 
@@ -270,7 +270,7 @@ Match the structure of `08_jepa_world_model_pretraining.ipynb` and
      the LIBERO finetuned model with `image`/`image2` and state `(8,)`.
    - Update docstrings to match the LIBERO reality. Do **not** change the live
      constants/keys — they are correct.
-2. **The embodiment mismatch is deliberate.** PI0.5 (fine-tuned on LIBERO's
+2. **The train/eval mismatch is deliberate.** PI0.5 (fine-tuned on LIBERO's
    Panda) drives an Isaac Lab Franka; expect "exploratory motion," not task
    success. The point is orchestration, not lifting the cube. Keep this framing
    honest in 03's markdown.

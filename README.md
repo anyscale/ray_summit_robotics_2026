@@ -203,9 +203,11 @@ PI05Config(); print('env OK')"
 
 ## A note on scope
 
-The VLA half (02/03) deliberately runs PI0.5 — fine-tuned on LIBERO's Panda —
-on Isaac Lab's Franka. The embodiments differ, so expect "exploratory motion,"
-not task success. We are validating the **orchestration loop**, not learning
-manipulation. Every training run here is at smoke scale (small step counts);
-the lesson is that the *same code* scales to production by changing config, not
-logic.
+Both the LIBERO training data and Isaac Lab's `Isaac-Lift-Cube-Franka-v0` use a
+**Franka Panda**, so the action and state dimensions line up cleanly. What PI0.5
+has *not* seen is this exact setup — Isaac Lab's action/control convention, scene
+and coordinate frame, and camera views (we feed one render into both of PI0.5's
+camera inputs). So in 02/03 expect **exploratory motion, not task success**: we're
+validating the **orchestration loop**, not manipulation skill. Every run here is
+at smoke scale (small step counts); the lesson is that the *same code* scales to
+production by changing config, not logic.

@@ -6,7 +6,7 @@ JointPositionAction + 1-D BinaryJointPositionAction gripper = 8-D action).
 Translates between Isaac Lab's flat obs/action space and PI0.5's nested
 dict schema.
 
-EMBODIMENT MISMATCH WARNING
+TRAIN / EVAL MISMATCH WARNING
 ---------------------------
 This wrapper is a deliberate "exploratory motion" demo. PI0.5 here is
 fine-tuned on LIBERO (a 7-DOF Panda arm), and we feed its output into
@@ -205,7 +205,7 @@ class LiftCubeFrankaEnv:
         was trained with two LIBERO camera views; rather than set up a
         separate wrist camera in Isaac Lab, the simplest workable thing is
         to feed the same view twice. This is another corner of the
-        embodiment mismatch we already chose to pay.
+        train/eval mismatch we already chose to pay.
         """
         # ---------- Video ----------
         try:
