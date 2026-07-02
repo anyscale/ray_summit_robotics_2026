@@ -104,7 +104,7 @@ export HF_TOKEN=hf_...
 
 | Component | Version |
 |-----------|---------|
-| Ray | 2.53.0 |
+| Ray | 2.53.0. & 2.55.0 |
 | Python | 3.11 |
 | PyTorch | 2.7.0 + CUDA 12.8 |
 | Isaac Sim | 5.1.0 |
@@ -130,7 +130,7 @@ worker nodes have no C compiler, so dynamo falls back to eager cleanly.
 <summary>Full Anyscale cluster image used by this course</summary>
 
 ```dockerfile
-FROM anyscale/ray:2.53.0-slim-py311-cu128
+FROM anyscale/ray:2.55.0-slim-py311-cu128
 # =============================================================================
 # Isaac Sim 5.1.0 + Isaac Lab on Anyscale Ray
 #   - Isaac Sim 5.X requires Python 3.11 (NOT 3.10, NOT 3.12)
