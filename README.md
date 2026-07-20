@@ -93,12 +93,18 @@ Ray releases GPUs between phases.
 
 ### HuggingFace token
 
-PI0.5 (notebooks 02/03) depends on the gated `google/paligemma-3b-pt-224`.
-Accept the license at <https://huggingface.co/google/paligemma-3b-pt-224> and:
+**No HF token is needed anywhere — not at runtime, and not even to build the image.**
 
-```bash
-export HF_TOKEN=hf_...
-```
+All datasets, the PI0.5 model, and the PaliGemma tokenizer are mirrored to a public S3
+bucket (`s3://anyscale-public-materials/ray_summit_robotics_2026/`). The notebooks run with
+`HF_HUB_OFFLINE=1`, and the Dockerfile bakes the tokenizer from that public bucket
+**anonymously** (`s3fs(anon=True)`). Nothing reaches Hugging Face at build time or run
+time, so hundreds of attendees can each build the image and run the tutorial with zero
+secrets — and HF cannot throttle the event.
+
+(The gated `google/paligemma-3b-pt-224` tokenizer was fetched once by the presenter to seed
+the mirror; it is redistributed under the Gemma Terms of Use — see `GEMMA_NOTICE.txt` at the
+S3 prefix.)
 
 ### Tested configuration
 

@@ -48,6 +48,11 @@ from fastapi import FastAPI, Request, Response
 from ray import serve
 
 
+# Public S3 mirror of the PI0.5 model (see 02_vla_finetuning.ipynb). Staged per node with
+# the AWS CLI --no-sign-request, so no HF token or bucket credentials are needed at runtime.
+MODEL_S3_URI = "s3://anyscale-public-materials/ray_summit_robotics_2026/pi05_libero_finetuned"
+
+
 # FastAPI app must live at module scope for Serve ingress to pick it up.
 _app = FastAPI()
 
@@ -112,17 +117,20 @@ class PI05PolicyServer:
         self._load_model()
 
     def _ensure_base_model(self):
-        """Make sure the PI0.5 base weights are on local disk on this node."""
+        """Make sure the PI0.5 base weights are on local disk on this node.
+
+        Synced from the public S3 mirror (MODEL_S3_URI) with --no-sign-request, so no HF
+        token or bucket credentials are required. Idempotent: skips if already staged by
+        notebook 02 or baked into the image.
+        """
         if (self.base_model_dir / "config.json").exists():
             return
         self.base_model_dir.mkdir(parents=True, exist_ok=True)
-        from huggingface_hub import snapshot_download
-        snapshot_download(
-            repo_id="lerobot/pi05_libero_finetuned",
-            repo_type="model",
-            local_dir=str(self.base_model_dir),
-            token=os.environ.get("HF_TOKEN"),
-            max_workers=8,
+        import subprocess
+        subprocess.run(
+            ["aws", "s3", "sync", MODEL_S3_URI, str(self.base_model_dir),
+             "--no-sign-request", "--only-show-errors"],
+            check=True,
         )
 
     def _load_model(self):

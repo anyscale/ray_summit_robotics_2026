@@ -79,6 +79,17 @@ from ray.data.extensions import ArrowVariableShapedTensorArray, ArrowVariableSha
 
 logger = logging.getLogger(__name__)
 
+# Opt-in via env var LEROBOT_S3_ANON=1: force anonymous (unsigned) S3 reads. Used when
+# the dataset lives in a PUBLIC S3 bucket that clusters may reach from other AWS
+# accounts/regions with no matching credentials -- signed reads can 403 there, unsigned
+# always work. Set at import so it also takes effect inside Ray Data read workers (this
+# module is shipped via runtime_env working_dir and re-imported there). All file opens in
+# this module go through fsspec.core.url_to_fs, which honors this config.
+import os as _os
+
+if _os.environ.get("LEROBOT_S3_ANON", "").lower() in ("1", "true", "yes"):
+    fsspec.config.conf.setdefault("s3", {})["anon"] = True
+
 __all__ = [
     "LeRobotDatasource",
     "LeRobotDatasourceMetadata",

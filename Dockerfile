@@ -136,6 +136,27 @@ RUN python -m pip uninstall -y transformers tokenizers || true \
  && python -m pip install --no-cache-dir \
     "git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi"
 
+# =============================================================================
+# Bake the PaliGemma tokenizer into the image HF cache (added 2026-07-20).
+# PI0.5's preprocessor calls AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224").
+# We stage the ~22 MB of tokenizer + config files (NO model weights) from the tutorial's
+# PUBLIC S3 mirror using s3fs in ANONYMOUS mode -- so this build needs **NO Hugging Face
+# token and NO credentials**. Every attendee can build this image with zero secrets.
+# (The presenter uploaded those files once; the same S3 prefix carries GEMMA_NOTICE.txt
+#  with the Gemma Terms of Use under which they are redistributed.) At runtime,
+#  HF_HUB_OFFLINE=1 loads the tokenizer from this baked cache -- the tutorial touches
+#  Hugging Face nowhere, at build time or run time.
+# (All other artifacts -- datasets + the PI0.5 model -- stream from the same public S3
+#  mirror at runtime, so this tokenizer is the only thing baked into the image.)
+# =============================================================================
+RUN python -c "import os, s3fs; \
+dst=os.path.expanduser('~/.cache/huggingface/hub')+'/'; os.makedirs(dst, exist_ok=True); \
+s3fs.S3FileSystem(anon=True).get('anyscale-public-materials/ray_summit_robotics_2026/paligemma_tokenizer/hub/', dst, recursive=True)" \
+ && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -c "from transformers import AutoTokenizer, AutoProcessor; \
+AutoTokenizer.from_pretrained('google/paligemma-3b-pt-224'); \
+AutoProcessor.from_pretrained('google/paligemma-3b-pt-224'); \
+print('PaliGemma tokenizer+processor cached OK (offline, tokenless)')"
+
 # Sanity check (fails the build if the env is broken)
 RUN python -c "import lerobot, transformers, isaaclab; \
 from lerobot.policies.pi05.modeling_pi05 import PI05Policy, PI05Config; \

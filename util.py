@@ -228,18 +228,24 @@ def load_checkpoint(checkpoint, policy, optimizer, scaler):
 # ============================================================================
 # Per-node HF snapshot staging (model only -- datasets are streamed via hf://)
 # ============================================================================
-def stage_model_to_local(repo_id, local_dir):
-    """Download a HF model to `local_dir` if not already present."""
+def stage_model_to_local(source_uri, local_dir):
+    """Sync a model/config dir from the PUBLIC S3 mirror to `local_dir` if not present.
+
+    `source_uri` is an ``s3://`` prefix (the tutorial's public mirror under
+    ``s3://anyscale-public-materials/ray_summit_robotics_2026/``). We use the AWS CLI
+    with ``--no-sign-request`` so any cluster reads the public bucket without needing
+    credentials for it. Idempotent: skips the sync when config.json is already present
+    (e.g. already staged on this node, or baked into the image).
+    """
     local_dir = Path(local_dir)
     if (local_dir / "config.json").exists():
         return f"cached: {local_dir}"
     local_dir.mkdir(parents=True, exist_ok=True)
-    from huggingface_hub import snapshot_download
-    snapshot_download(
-        repo_id=repo_id, repo_type="model",
-        local_dir=str(local_dir),
-        token=os.environ.get("HF_TOKEN"),
-        max_workers=8,
+    import subprocess
+    subprocess.run(
+        ["aws", "s3", "sync", str(source_uri), str(local_dir),
+         "--no-sign-request", "--only-show-errors"],
+        check=True,
     )
     return f"downloaded: {local_dir}"
 
