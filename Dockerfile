@@ -19,6 +19,11 @@ ENV __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
 # Vulkan ICD — NVIDIA driver mounts this at runtime
 ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
 ENV VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json
+# Request all driver capabilities (also injects the graphics device nodes: nvidia-modeset,
+# /dev/dri/renderD*). NOTE: on this platform this is NOT sufficient by itself — the host
+# driver carries no graphics *userspace*, so the NVIDIA container runtime has no graphics libs
+# to mount regardless of this setting. The graphics userspace is baked in explicitly below.
+ENV NVIDIA_DRIVER_CAPABILITIES=all
 USER root
 # ---------- system deps: EGL + Vulkan + misc ----------
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -58,6 +63,46 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /etc/vulkan/icd.d && \
     echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.3.277"}}' \
     > /etc/vulkan/icd.d/nvidia_icd.json
+# ---------- NVIDIA graphics userspace (added 2026-07-22) ----------
+# The NVIDIA container runtime injects only COMPUTE driver libs (libcuda, nvidia-ml, ...); the
+# g7e host driver carries no graphics userspace, so libGLX_nvidia.so.0 (the NVIDIA Vulkan ICD),
+# libnvidia-glcore/rtcore/eglcore/... and the GLVND EGL vendor JSON are all absent from the
+# container. Without them Isaac Sim's Vulkan/RTX renderer can't initialize
+# (vkCreateInstance -> ERROR_INCOMPATIBLE_DRIVER) -> all-black frames + PhysX-GPU init hang.
+# Fix: bake the *graphics* userspace from the version-matched (=host kernel driver) .run.
+# The EGL vendor JSON (10_nvidia.json) is essential — the driver's init path goes through GLVND
+# EGL, and without it registered the init silently fails (VK_ERROR_INITIALIZATION_FAILED).
+# Verified live on g7e.4xlarge / RTX PRO 6000 Blackwell: vulkaninfo then enumerates the GPU.
+ENV NV_DRIVER_VERSION=580.126.09
+RUN set -eux; cd /tmp; \
+    curl -fsSL -o nv.run \
+      "https://us.download.nvidia.com/tesla/${NV_DRIVER_VERSION}/NVIDIA-Linux-x86_64-${NV_DRIVER_VERSION}.run"; \
+    sh nv.run --extract-only --target /tmp/nvx; \
+    L=/usr/lib/x86_64-linux-gnu; \
+    cp -a \
+      "/tmp/nvx/libGLX_nvidia.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libEGL_nvidia.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libnvidia-glcore.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libnvidia-glsi.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libnvidia-glvkspirv.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libnvidia-gpucomp.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libnvidia-rtcore.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libnvidia-eglcore.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libnvidia-tls.so.${NV_DRIVER_VERSION}" \
+      "/tmp/nvx/libnvidia-allocator.so.${NV_DRIVER_VERSION}" \
+      /tmp/nvx/libnvidia-egl-gbm.so.1.* \
+      "$L/"; \
+    ln -sf "libGLX_nvidia.so.${NV_DRIVER_VERSION}" "$L/libGLX_nvidia.so.0"; \
+    ln -sf "libEGL_nvidia.so.${NV_DRIVER_VERSION}" "$L/libEGL_nvidia.so.0"; \
+    ln -sf "libnvidia-allocator.so.${NV_DRIVER_VERSION}" "$L/libnvidia-allocator.so.1"; \
+    ln -sf "$(cd "$L" && ls libnvidia-egl-gbm.so.1.*)" "$L/libnvidia-egl-gbm.so.1"; \
+    mkdir -p /usr/share/glvnd/egl_vendor.d /usr/share/egl/egl_external_platform.d; \
+    cp /tmp/nvx/10_nvidia.json /usr/share/glvnd/egl_vendor.d/; \
+    cp /tmp/nvx/15_nvidia_gbm.json /tmp/nvx/20_nvidia_xcb.json \
+       /tmp/nvx/20_nvidia_xlib.json /tmp/nvx/10_nvidia_wayland.json \
+       /usr/share/egl/egl_external_platform.d/; \
+    ldconfig; \
+    rm -rf /tmp/nv.run /tmp/nvx
 USER ray
 WORKDIR /home/ray
 # ---------- PyTorch (pinned to Isaac Lab's recommended version) ----------
