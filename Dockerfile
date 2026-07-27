@@ -115,8 +115,11 @@ RUN python -m pip install --upgrade pip && \
 RUN python -m pip install --no-cache-dir \
     "isaacsim[all]==5.1.0" \
     --extra-index-url https://pypi.nvidia.com
-# ---------- Isaac Lab from source ----------
-RUN git clone --depth 1 https://github.com/isaac-sim/IsaacLab.git /home/ray/IsaacLab
+# ---------- Isaac Lab from source (pinned; `main` moves and would silently drift) ----------
+# v2.3.2 is the newest 2.x tag: README compat table lists Isaac Sim 4.5/5.0/5.1, and
+# python_requires>=3.10 with classifiers for 3.10/3.11. Do NOT bump to v3.0.0-beta* or
+# track `develop` -- that line requires Python >=3.12, which Isaac Sim 5.1.0 can't use.
+RUN git clone --depth 1 --branch v2.3.2 https://github.com/isaac-sim/IsaacLab.git /home/ray/IsaacLab
 # Install Isaac Lab extensions as editable packages
 RUN cd /home/ray/IsaacLab && \
     python -m pip install --no-cache-dir \
@@ -164,10 +167,10 @@ RUN python -m pip install --no-cache-dir \
     "jsonlines>=4,<5" \
     "packaging>=24.2,<26" \
     "pyserial>=3.5,<4" \
-    "sentencepiece" \
+    "sentencepiece==0.2.2" \
     "termcolor>=2.4,<4" \
-    "torchcodec>=0.2.1,<0.6" \
-    "av>=15,<16" \
+    "torchcodec==0.5" \
+    "av==15.1.0" \
     "wandb>=0.24,<0.25" \
     "s3fs>=2024.1" \
     "fsspec[s3]>=2024.1"
@@ -177,9 +180,11 @@ RUN python -m pip install --no-cache-dir \
 # under a different key layout than mainline 4.57+, AND PI05Pytorch.__init__
 # aborts unless `transformers.models.siglip.check` exists (only in this fork).
 # Install with deps so tokenizers gets pulled to the fork's required <0.22.
+# Pinned to the branch tip as of 2026-07-27 (reports itself as transformers 4.53.3);
+# a bare branch name would let a rebase or force-push silently change the model code.
 RUN python -m pip uninstall -y transformers tokenizers || true \
  && python -m pip install --no-cache-dir \
-    "git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi"
+    "git+https://github.com/huggingface/transformers.git@dcddb970176382c0fcf4521b0c0e6fc15894dfe0"
 
 # =============================================================================
 # Bake the PaliGemma tokenizer into the image HF cache (added 2026-07-20).

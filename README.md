@@ -80,7 +80,7 @@ read the whole story without a cluster, then re-run any of them on your own.
 
 ### Cluster
 
-A **4× L4 Anyscale cluster** running the image below. The head node is CPU-only;
+A **4× L4 Anyscale cluster** running the image defined in [`Dockerfile`](./Dockerfile). The head node is CPU-only;
 the 4 L4s are worker nodes accessed via Ray. Resource use is phased so the
 cluster is never over-subscribed:
 
@@ -114,9 +114,9 @@ S3 prefix.)
 | Python | 3.11 |
 | PyTorch | 2.7.0 + CUDA 12.8 |
 | Isaac Sim | 5.1.0 |
-| Isaac Lab | latest from source |
+| Isaac Lab | 2.3.2 (pinned tag, built from source) |
 | lerobot | 0.4.3 (`--no-deps`) |
-| transformers | `huggingface/transformers@fix/lerobot_openpi` (patched fork) |
+| transformers | `huggingface/transformers@dcddb97` (patched fork, pinned commit) |
 
 **Why the patched transformers fork?** PI0.5's checkpoint stores Gemma
 layernorm parameters under a different key layout than mainline `transformers
@@ -132,78 +132,21 @@ worker nodes have no C compiler, so dynamo falls back to eager cleanly.
 
 ### Cluster image (Dockerfile)
 
-<details>
-<summary>Full Anyscale cluster image used by this course</summary>
+The image is defined by [`Dockerfile`](./Dockerfile) in this directory, which is the single
+source of truth — build that file as-is.
 
-```dockerfile
-FROM anyscale/ray:2.55.0-slim-py311-cu128
-# =============================================================================
-# Isaac Sim 5.1.0 + Isaac Lab on Anyscale Ray
-#   - Isaac Sim 5.X requires Python 3.11 (NOT 3.10, NOT 3.12)
-#   - Isaac Lab recommends torch 2.7.0 + CUDA 12.8
-#   - Headless GPU rendering needs Vulkan + EGL userspace libs
-# =============================================================================
-ENV DEBIAN_FRONTEND=noninteractive
-ENV OMNI_KIT_ACCEPT_EULA=YES
-ENV ACCEPT_EULA=Y
-ENV PYTHONUNBUFFERED=1
-ENV DISPLAY=""
-ENV OMNI_KIT_RENDERING_MODE=headless
-ENV __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
-ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
-ENV VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl wget ca-certificates \
-    libgl1 libegl1 libegl-mesa0 libgles2 libglvnd0 libglvnd-dev \
-    libvulkan1 libvulkan-dev vulkan-tools mesa-vulkan-drivers \
-    libxrandr2 libxinerama1 libxcursor1 libxi6 libxkbcommon0 libx11-6 \
-    libxext6 libxt6 libglu1-mesa libsm6 libice6 libfontconfig1 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /etc/vulkan/icd.d && \
-    echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libGLX_nvidia.so.0","api_version":"1.3.277"}}' \
-    > /etc/vulkan/icd.d/nvidia_icd.json
-USER ray
-WORKDIR /home/ray
-RUN python -m pip install --upgrade pip && \
-    python -m pip install --no-cache-dir \
-    "torch==2.7.0" "torchvision==0.22.0" \
-    --index-url https://download.pytorch.org/whl/cu128
-RUN python -m pip install --no-cache-dir "isaacsim[all]==5.1.0" \
-    --extra-index-url https://pypi.nvidia.com
-RUN git clone --depth 1 https://github.com/isaac-sim/IsaacLab.git /home/ray/IsaacLab
-RUN cd /home/ray/IsaacLab && python -m pip install --no-cache-dir \
-    -e source/isaaclab -e source/isaaclab_tasks -e source/isaaclab_rl
-RUN python -m pip install --no-cache-dir pillow gymnasium
-ENV PYTHONPATH=/home/ray/IsaacLab/source/isaaclab:\
-/home/ray/IsaacLab/source/isaaclab_tasks:\
-/home/ray/IsaacLab/source/isaaclab_rl:${PYTHONPATH}
-WORKDIR /home/ray/default
+Two things worth knowing before you build:
 
-# -------- VLA / lerobot overlay (verified compatible with Isaac Sim) --------
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-USER ray
-RUN python -m pip install --no-cache-dir --no-deps lerobot==0.4.3
-RUN python -m pip install --no-cache-dir \
-    "numpy>=1.26,<2" "datasets>=4.0,<4.2" "accelerate>=1.10,<2" \
-    "deepdiff>=7,<9" "diffusers>=0.27.2,<0.36" "draccus==0.10.0" \
-    "einops>=0.8,<0.9" "huggingface-hub[cli,hf-transfer]>=0.34.2,<0.36" \
-    "imageio[ffmpeg]==2.37.0" "jsonlines>=4,<5" "packaging>=24.2,<26" \
-    "pyserial>=3.5,<4" "sentencepiece" "termcolor>=2.4,<4" \
-    "torchcodec>=0.2.1,<0.6" "av>=15,<16" "s3fs>=2024.1" "fsspec[s3]>=2024.1"
-# Patched transformers fork (see "Why the patched fork?" above).
-RUN python -m pip uninstall -y transformers tokenizers || true \
- && python -m pip install --no-cache-dir \
-    "git+https://github.com/huggingface/transformers.git@fix/lerobot_openpi"
-RUN python -c "import lerobot, transformers, isaaclab; \
-from lerobot.policies.pi05.modeling_pi05 import PI05Policy, PI05Config; \
-PI05Config(); print('env OK')"
-```
+- **The NVIDIA graphics-userspace block is not optional.** The container runtime injects only
+  *compute* driver libs, so without it Isaac Sim's Vulkan/RTX renderer has no graphics libs to
+  load and dies with `ERROR_INCOMPATIBLE_DRIVER` — all-black frames plus a PhysX-GPU init hang.
+  The Dockerfile bakes them from the version-matched driver `.run`, so `NV_DRIVER_VERSION` must
+  match the host kernel driver reported by `nvidia-smi`.
+- **Isaac Lab is pinned to a tag and the transformers fork to a commit**, so independent builds
+  resolve to the same code instead of tracking a moving branch.
 
-(No Weights & Biases anywhere — metrics are reported through Ray Train.)
-</details>
+(No Weights & Biases in the tutorial — metrics are reported through Ray Train. `wandb` is
+installed only because lerobot expects it to be importable.)
 
 ---
 
