@@ -114,7 +114,7 @@ S3 prefix.)
 | Python | 3.11 |
 | PyTorch | 2.7.0 + CUDA 12.8 |
 | Isaac Sim | 5.1.0 |
-| Isaac Lab | 2.3.2 (pinned tag, built from source) |
+| Isaac Lab | 0.54.4 (`main@b0542fe`, pinned commit, built from source) |
 | lerobot | 0.4.3 (`--no-deps`) |
 | transformers | `huggingface/transformers@dcddb97` (patched fork, pinned commit) |
 

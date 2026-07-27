@@ -115,11 +115,23 @@ RUN python -m pip install --upgrade pip && \
 RUN python -m pip install --no-cache-dir \
     "isaacsim[all]==5.1.0" \
     --extra-index-url https://pypi.nvidia.com
-# ---------- Isaac Lab from source (pinned; `main` moves and would silently drift) ----------
-# v2.3.2 is the newest 2.x tag: README compat table lists Isaac Sim 4.5/5.0/5.1, and
-# python_requires>=3.10 with classifiers for 3.10/3.11. Do NOT bump to v3.0.0-beta* or
-# track `develop` -- that line requires Python >=3.12, which Isaac Sim 5.1.0 can't use.
-RUN git clone --depth 1 --branch v2.3.2 https://github.com/isaac-sim/IsaacLab.git /home/ray/IsaacLab
+# ---------- Isaac Lab from source (pinned to an exact commit) ----------
+# main@b0542fe == extension version 0.54.4, the tree this image was verified against.
+# Pinned by SHA instead of tracking `main`, which moves. Single-commit shallow fetch
+# (GitHub serves a SHA directly), so the checkout stays ~34 MB.
+#
+# Do NOT "pin" this to the v2.3.2 tag: that tag requires flatdict==4.0.1, which is
+# sdist-only on PyPI, and its setup.py does `import pkg_resources` -- removed from modern
+# setuptools -- so the editable install below dies with ModuleNotFoundError. `main` requires
+# flatdict>=4.1.0, which ships a wheel and needs no build step.
+# Do NOT move to `develop` / v3.0.0-beta* either: that line requires Python >=3.12, and
+# Isaac Sim 5.1.0 needs 3.11.
+ENV ISAACLAB_COMMIT=b0542fe2d45bf91c4e1d9ef6952b9c709c80b4e8
+RUN mkdir -p /home/ray/IsaacLab && cd /home/ray/IsaacLab && \
+    git init -q . && \
+    git remote add origin https://github.com/isaac-sim/IsaacLab.git && \
+    git fetch -q --depth 1 origin "${ISAACLAB_COMMIT}" && \
+    git checkout -q FETCH_HEAD
 # Install Isaac Lab extensions as editable packages
 RUN cd /home/ray/IsaacLab && \
     python -m pip install --no-cache-dir \
