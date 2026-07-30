@@ -50,7 +50,7 @@ from ray import serve
 
 # Public S3 mirror of the PI0.5 model (see 02_vla_finetuning.ipynb). Staged per node with
 # the AWS CLI --no-sign-request, so no HF token or bucket credentials are needed at runtime.
-MODEL_S3_URI = "s3://anyscale-public-materials/ray_summit_robotics_2026/pi05_libero_finetuned"
+MODEL_S3_URI = "s3://anyscale-public-materials-use2/ray_summit_robotics_2026/pi05_libero_finetuned"
 
 
 # FastAPI app must live at module scope for Serve ingress to pick it up.

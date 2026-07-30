@@ -96,7 +96,7 @@ Ray releases GPUs between phases.
 **No HF token is needed anywhere — not at runtime, and not even to build the image.**
 
 All datasets, the PI0.5 model, and the PaliGemma tokenizer are mirrored to a public S3
-bucket (`s3://anyscale-public-materials/ray_summit_robotics_2026/`). The notebooks run with
+bucket (`s3://anyscale-public-materials-use2/ray_summit_robotics_2026/`). The notebooks run with
 `HF_HUB_OFFLINE=1`, and the Dockerfile bakes the tokenizer from that public bucket
 **anonymously** (`s3fs(anon=True)`). Nothing reaches Hugging Face at build time or run
 time, so hundreds of attendees can each build the image and run the tutorial with zero

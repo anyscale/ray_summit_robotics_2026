@@ -213,7 +213,7 @@ RUN python -m pip uninstall -y transformers tokenizers || true \
 # =============================================================================
 RUN python -c "import os, s3fs; \
 dst=os.path.expanduser('~/.cache/huggingface/hub')+'/'; os.makedirs(dst, exist_ok=True); \
-s3fs.S3FileSystem(anon=True).get('anyscale-public-materials/ray_summit_robotics_2026/paligemma_tokenizer/hub/', dst, recursive=True)" \
+s3fs.S3FileSystem(anon=True).get('anyscale-public-materials-use2/ray_summit_robotics_2026/paligemma_tokenizer/hub/', dst, recursive=True)" \
  && HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python -c "from transformers import AutoTokenizer, AutoProcessor; \
 AutoTokenizer.from_pretrained('google/paligemma-3b-pt-224'); \
 AutoProcessor.from_pretrained('google/paligemma-3b-pt-224'); \

@@ -232,7 +232,7 @@ def stage_model_to_local(source_uri, local_dir):
     """Sync a model/config dir from the PUBLIC S3 mirror to `local_dir` if not present.
 
     `source_uri` is an ``s3://`` prefix (the tutorial's public mirror under
-    ``s3://anyscale-public-materials/ray_summit_robotics_2026/``). We use the AWS CLI
+    ``s3://anyscale-public-materials-use2/ray_summit_robotics_2026/``). We use the AWS CLI
     with ``--no-sign-request`` so any cluster reads the public bucket without needing
     credentials for it. Idempotent: skips the sync when config.json is already present
     (e.g. already staged on this node, or baked into the image).
