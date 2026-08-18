@@ -155,18 +155,31 @@ class PI05PolicyServer:
         self._ensure_base_model()
         _apply_pi05_attention_mask_patch()
 
+        from tools import util
+        util.quiet_benign_lerobot_logs()
+
         from lerobot.policies.pi05 import PI05Policy
         from lerobot.policies.factory import make_pre_post_processors
 
         t0 = time.time()
         # NOTE: train_expert_only=True matches training. The action expert
         # heads we trained are the only thing we want to swap.
-        policy = PI05Policy.from_pretrained(
-            str(self.base_model_dir),
-            device=self.device,
-            dtype=torch.float16,
-            train_expert_only=True,
-        )
+        #
+        # strict=False for the BASE weights: model.safetensors omits
+        # paligemma...embed_tokens.weight because PaliGemma ties it to
+        # lm_head.weight (one tensor, stored once). Under the default
+        # strict=True, lerobot's loader raises inside its own try/except and
+        # prints "Warning: Could not remap state dict keys: Error(s) in loading
+        # state_dict ..." after the weights are already in place -- noise that
+        # reads like a load failure during every replica start.
+        with util.quiet_benign_lerobot_prints():
+            policy = PI05Policy.from_pretrained(
+                str(self.base_model_dir),
+                device=self.device,
+                dtype=torch.float16,
+                train_expert_only=True,
+                strict=False,
+            )
         # Overlay trained head weights. strict=False because the checkpoint
         # only contains action_in_proj / action_out_proj / time_mlp_in / time_mlp_out.
         missing, unexpected = policy.load_state_dict(trained_sd, strict=False)

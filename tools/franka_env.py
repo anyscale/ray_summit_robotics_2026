@@ -23,7 +23,7 @@ PROCESS MODEL
 -------------
 Isaac Sim's Kit engine uses its own event loop and conflicts with Ray's
 worker loop. The pattern used throughout this course: run this wrapper
-inside a SUBPROCESS spawned by `sim_worker.py` (itself launched as a Ray
+inside a SUBPROCESS spawned by `tools/sim_worker.py` (itself launched as a Ray
 task from the serving + sim-eval notebook). The subprocess gets a clean
 Python interpreter + event loop, and the AppLauncher boots into that.
 

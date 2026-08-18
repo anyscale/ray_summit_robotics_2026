@@ -13,7 +13,7 @@ exposes the policy at `http://HEAD:8000/predict`, and we POST a pickled obs
 dict and get a pickled action chunk back.
 
 Usage (invoked by the serving + sim-eval notebook, 03):
-    python sim_worker.py \
+    python tools/sim_worker.py \
         --worker-id 0 \
         --policy-url http://10.0.18.189:8000 \
         --episodes 1 \

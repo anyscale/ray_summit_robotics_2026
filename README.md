@@ -72,6 +72,32 @@ SmolVLA track.
 scalable inference (03 serving, 05 edge) · world-foundation model pre-training
 at scale (04).
 
+### What goes in
+
+The training data is **LIBERO**, streamed straight from the public S3 mirror by
+`tools/lerobot_datasource.py` — no download step, no local copy. Each episode is a
+language instruction plus two synchronized camera streams, and both views are what
+PI0.5 actually consumes:
+
+<table>
+<tr>
+<td align="center" width="50%">
+  <img src="assets/libero_task_a.gif" width="340" alt="LIBERO episode: a Franka arm placing two moka pots on a stove, scene camera and wrist camera side by side"><br>
+  <sub><b>"put both moka pots on the stove"</b></sub>
+</td>
+<td align="center" width="50%">
+  <img src="assets/libero_task_b.gif" width="340" alt="LIBERO episode: a Franka arm moving mugs onto plates, scene camera and wrist camera side by side"><br>
+  <sub><b>"put the white mug on the left plate and put the yellow<br>and white mug on the right plate"</b></sub>
+</td>
+</tr>
+</table>
+
+<p align="center">
+  <sub>Left half of each clip: <code>observation.images.image</code> (scene). Right half:
+  <code>observation.images.image2</code> (wrist). 273,465 frames across 37 file groups,
+  decoded on the fly.</sub>
+</p>
+
 ### What comes out of the loop
 
 Every sim worker saves the episode it rolled out, so each round of notebook 03
@@ -90,8 +116,8 @@ hands you the Franka arm actually being driven by the policy you just trained:
 </tr>
 </table>
 
-These are smoke-scale runs of 50 steps, so expect exploratory motion rather than
-a clean pick. What is being demonstrated is the loop: serve, roll out, filter by
+These are smoke-scale runs — 50 training steps in notebook 02, 100 in notebook 03's
+round-2 retrain — so expect exploratory motion rather than a clean pick. What is being demonstrated is the loop: serve, roll out, filter by
 reward, `union()` into the training stream, retrain, and compare under identical
 seeds. See [A note on scope](#a-note-on-scope) for why the motion looks this way.
 
@@ -125,6 +151,11 @@ Ray Train workload, submit it, and read the result.
 Same lesson as the rest of the course, arrived at from the other direction: the
 orchestration is config, not code, which is exactly why an agent can drive it.
 
+**The brief lives in [`prompts/smolvla_agent.txt`](./prompts/smolvla_agent.txt).**
+Hand it to your agent as-is once the setup below is done — it states the smoke-test
+goal, pins the run to the GPUs already in this workspace, and tells the agent not
+to hand back until loss is printing and a checkpoint is written.
+
 > ### Setup: install your agent
 >
 > Install one agent CLI, then the Anyscale skills. Copy and paste as is.
@@ -132,10 +163,10 @@ orchestration is config, not code, which is exactly why an agent can drive it.
 > **Quick path.** Claude Code is standalone and needs no Node:
 >
 > ```bash
-> curl -fsSL https://claude.ai/install.sh | bash   # skip if using codex/cursor
 > pip install -U anyscale
 > anyscale login
 > anyscale skills install -p claude-code -p cursor -p codex --accept-terms
+> curl -fsSL https://claude.ai/install.sh | bash   # skip if using codex/cursor
 > ```
 >
 > **Using a different agent?** Install its CLI, then run the three `anyscale`
@@ -160,16 +191,45 @@ orchestration is config, not code, which is exactly why an agent can drive it.
 
 ---
 
-## Shared modules
+## Repo layout
+
+```
+.
+├── 00_overview.ipynb … 05_distillation_for_edge.ipynb   the course, read in order
+├── prerequisite_00_ray_data.ipynb                       optional Ray warm-ups
+├── prerequisite_01_ray_train.ipynb
+├── tools/          shared Python imported by the notebooks
+├── prompts/        the agent-led track's brief
+├── assets/         GIFs and diagrams the notebooks display
+├── Dockerfile      the cluster image (single source of truth)
+└── README.md
+```
+
+Everything under `tools/` is imported as a package, so one style works on the
+driver and on every Ray worker alike — Ray puts the `runtime_env` working
+directory (this repo root) on `sys.path`:
+
+```python
+from tools import cluster, util
+from tools.lerobot_datasource import LeRobotDatasource
+from tools.policy_server import PI05PolicyServer
+```
+
+`tools/sim_worker.py` is the one exception: it runs as a standalone subprocess
+(`python -u tools/sim_worker.py`), so it imports its sibling `franka_env`
+directly rather than through the package.
+
+### Shared modules
 
 | File | Used by | Role |
 |------|---------|------|
-| `lerobot_datasource.py` | 01/02/03/04 | Ray Data `Datasource` for LeRobot v3 (streaming parquet + mp4) |
-| `cluster.py` | 00–05 | Reads the live cluster shape; derives every train/sim worker count |
-| `util.py` | 02/03 | Model load/freeze, checkpoint I/O, LR schedule, node staging |
-| `policy_server.py` | 03 | `@serve.deployment` PI0.5 HTTP policy server |
-| `franka_env.py` | 03 | Isaac Lab `Isaac-Lift-Cube-Franka-v0` wrapper |
-| `sim_worker.py` | 03 | Standalone subprocess: boots Isaac Lab, queries Serve, saves GIF + trajectory |
+| `tools/lerobot_datasource.py` | 01/02/03/04 | Ray Data `Datasource` for LeRobot v3 (streaming parquet + mp4) |
+| `tools/cluster.py` | 00–05 | Reads the live cluster shape; derives every train/sim worker count |
+| `tools/util.py` | 02/03 | Model load/freeze, checkpoint I/O, LR schedule, node staging |
+| `tools/viz.py` | 01–05 | Renders the inline GIFs from `assets/` |
+| `tools/policy_server.py` | 03 | `@serve.deployment` PI0.5 HTTP policy server |
+| `tools/franka_env.py` | 03 | Isaac Lab `Isaac-Lift-Cube-Franka-v0` wrapper |
+| `tools/sim_worker.py` | 03 | Standalone subprocess: boots Isaac Lab, queries Serve, saves GIF + trajectory |
 
 ---
 
@@ -182,20 +242,21 @@ An Anyscale cluster with **2 or 4 GPU workers**, running the image defined in
 
 **Supported instance types:** any of these runs the full course:
 
-| Instance | GPUs per node | GPU | VRAM |
-|---|---|---|---|
-| `g4dn.xlarge` | 1 | T4 | 16 GB |
-| `g4dn.2xlarge` | 1 | T4 | 16 GB |
-| `g5.2xlarge` | 1 | A10G | 24 GB |
-| `g6.12xlarge` | 4 | L4 | 24 GB |
-| `g7.2xlarge` | 1 | Blackwell-class | 24 GB+ |
-| `g7e.4xlarge` | 1 | RTX PRO 6000 | 96 GB |
+| Instance | GPUs per node | GPU | VRAM | Nodes for 2 GPUs | Nodes for 4 GPUs |
+|---|---|---|---|---|---|
+| `g4dn.xlarge` | 1 | T4 | 16 GB | 2 | 4 |
+| `g4dn.2xlarge` | 1 | T4 | 16 GB | 2 | 4 |
+| `g5.2xlarge` | 1 | A10G | 24 GB | 2 | 4 |
+| `g6.12xlarge` | 4 | L4 | 24 GB | n/a (one node is already 4) | 1 |
+| `g7.2xlarge` | 1 | Blackwell-class | 24 GB+ | 2 | 4 |
+| `g7e.4xlarge` | 1 | RTX PRO 6000 | 96 GB | 2 | 4 |
 
 So a cluster is 2 or 4 single-GPU nodes, or a single `g6.12xlarge` carrying all 4 GPUs. The
-notebooks treat these identically.
+notebooks treat these identically — with one exception, notebook 03's sim fan-out, which
+counts GPU *nodes* rather than GPUs (see the table below).
 
 **Nothing in this course is pinned to a GPU count, a GPU model, or an instance type.** Every
-worker count is derived from the live cluster at runtime by [`cluster.py`](./cluster.py):
+worker count is derived from the live cluster at runtime by [`tools/cluster.py`](./cluster.py):
 
 | Setting | Derived as | 2 GPUs | 4 GPUs |
 |---|---|---|---|
@@ -207,14 +268,27 @@ Every notebook opens with `cluster.describe()`, which prints the GPU count, GPU 
 per-node layout it found, along with the worker counts derived from them. Set `NUM_WORKERS` or
 `SIM_WORKERS` in the environment to pin a run smaller than the cluster.
 
-Resource use is phased so the cluster is never over-subscribed, whatever its size:
+#### GPUs each notebook uses
 
-| Phase | GPUs used | On 2 GPUs | On 4 GPUs |
-|-------|-----------|-----------|-----------|
-| Training (Ray Train DDP) | all of them | 2 workers | 4 workers |
-| Sim eval (1 Serve replica + N sim workers) | replica plus one rollout per remaining GPU node | 1 replica + 1 sim | 1 replica + 1 sim on a g6.12xlarge |
+Resource use is phased so the cluster is never over-subscribed, whatever its size.
+Ray releases every GPU between phases, so no notebook needs a GPU that another is
+still holding.
 
-Ray releases GPUs between phases.
+| Notebook | What holds a GPU | On 2 GPUs | On 4 GPUs |
+|---|---|---|---|
+| 00 overview | nothing — prose and diagrams | 0 | 0 |
+| 01 data pipelines | nothing — Ray Data decodes video on CPU | 0 | 0 |
+| 02 VLA fine-tune | one Ray Train worker per GPU | 2 | 4 |
+| 03 sim-eval phase | 1 Serve policy replica, plus one Isaac Lab rollout per *remaining GPU node* | 1 replica + 1 sim | 1 replica + 1 sim on one `g6.12xlarge`; 1 replica + 3 sims across four 1-GPU nodes |
+| 03 retrain phase | one Ray Train worker per GPU | 2 | 4 |
+| 04 world model | one Ray Train worker per GPU | 2 | 4 |
+| 05 distillation | one Ray Train worker per GPU | 2 | 4 |
+
+Notebook 03 is the only one whose count depends on cluster *shape* rather than GPU
+count: the policy replica reserves one GPU for the whole sim phase, and Isaac Sim
+boots one Kit runtime per process sharing a per-node extension cache, so the fan-out
+is `min(GPUs − 1, GPU nodes)`. Four GPUs on four nodes gives 3 parallel rollouts;
+the same four GPUs on one node gives 1.
 
 **No credentials of any kind.** Datasets, the PI0.5 weights, and the PaliGemma tokenizer all
 come from a public S3 mirror (`s3://anyscale-public-materials-use2/ray_summit_robotics_2026/`)

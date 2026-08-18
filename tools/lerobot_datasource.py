@@ -42,7 +42,7 @@ Partitioning
 Typical usage::
 
     import ray
-    from lerobot_datasource import LeRobotDatasource, read_lerobot, Partitioning
+    from tools.lerobot_datasource import LeRobotDatasource, read_lerobot, Partitioning
 
     ds = read_lerobot("/data/my_dataset")
     ds = read_lerobot("gs://bucket/dataset", partitioning=Partitioning.EPISODE)
@@ -297,6 +297,50 @@ class LeRobotDatasourceMetadata:
         return self.info["data_path"]
 
 
+class _ReadCancelled(Exception):
+    """Ray cancelled this read task. Raised inside the reader, caught in _read.
+
+    Distinct from the exhaustion RuntimeError _next_frame raises: a cancelled
+    read stops mid-file by design, and reporting that as a truncated video would
+    be wrong.
+    """
+
+
+class _CancelSafeFile:
+    """File proxy that reports EOF instead of letting a cancellation reach PyAV.
+
+    PyAV reads a file-like object through a C callback
+    (``av.container.pyio.pyio_read_gil``). Ray cancels a read task by raising
+    KeyboardInterrupt in the worker, and when that lands inside ``read()`` --
+    called from within the callback -- the exception cannot propagate through
+    the C frame: CPython prints "Exception ignored in ..." plus the full
+    traceback and carries on. Returning empty bytes instead reads as
+    end-of-file, so PyAV unwinds normally and ``cancelled`` tells the caller to
+    stop streaming.
+    """
+
+    def __init__(self, fileobj):
+        self._f = fileobj
+        self.cancelled = False
+
+    def read(self, *args, **kwargs):
+        try:
+            return self._f.read(*args, **kwargs)
+        except KeyboardInterrupt:
+            self.cancelled = True
+            return b""
+
+    def seek(self, *args, **kwargs):
+        try:
+            return self._f.seek(*args, **kwargs)
+        except KeyboardInterrupt:
+            self.cancelled = True
+            return self._f.tell()
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+
 class LeRobotReadTask(ReadTask):
     """A Ray Data read task covering one or more contiguous row segments.
 
@@ -353,10 +397,23 @@ class LeRobotReadTask(ReadTask):
         self._action_chunk_size = int(action_chunk_size)
 
     def _read(self) -> Iterator[pa.Table]:
-        """Stream decoded rows as Arrow tables, iterating over all segments."""
+        """Stream decoded rows as Arrow tables, iterating over all segments.
+
+        Ray Data cancels still-running read tasks whenever the consumer stops
+        early -- a ``limit()`` reaching its row count, or a training loop that
+        breaks at ``max_train_steps``. Cancellation arrives as a KeyboardInterrupt
+        raised in this worker, so a routine, expected teardown otherwise dumps a
+        full traceback into the driver's output. Ending the generator quietly
+        finishes the task just as fast, without the alarming output.
+        """
         metas: list[LeRobotDatasourceMetadata] = ray.get(self._metas_ref)
-        for root_idx, start, end, resolved_paths in self._segments_resolved:
-            yield from self._read_segment(metas[root_idx], start, end, root_idx, resolved_paths)
+        try:
+            for root_idx, start, end, resolved_paths in self._segments_resolved:
+                yield from self._read_segment(
+                    metas[root_idx], start, end, root_idx, resolved_paths
+                )
+        except (_ReadCancelled, KeyboardInterrupt):
+            return
 
     def _read_segment(
         self,
@@ -569,7 +626,12 @@ class LeRobotReadTask(ReadTask):
         use the same code path with no GPU or PyTorch dependency.
         """
         for i, path in enumerate(fs_paths):
-            container = av.open(path) if is_local else av.open(fs.open(path, "rb"))
+            # Remote reads go through a Python file object that PyAV calls from
+            # C, which is where a cancellation would otherwise escape as an
+            # uncatchable "Exception ignored in: 'av.container.pyio.pyio_read_gil'"
+            # traceback -- see _CancelSafeFile.
+            handle = None if is_local else _CancelSafeFile(fs.open(path, "rb"))
+            container = av.open(path) if is_local else av.open(handle)
             try:
                 stream = container.streams.video[0]
                 if stream.time_base is None or stream.average_rate is None:
@@ -587,6 +649,17 @@ class LeRobotReadTask(ReadTask):
                     except av.InvalidDataError:
                         # Corrupted packets can appear just after a seek; skip.
                         continue
+                    if handle is not None and handle.cancelled:
+                        raise _ReadCancelled
+            except KeyboardInterrupt:
+                # Ray cancelled this read task (consumer stopped early).
+                raise _ReadCancelled from None
+            except av.FFmpegError:
+                # The EOF _CancelSafeFile reports on cancellation can surface
+                # here as truncated input. Anything else is a real decode error.
+                if handle is not None and handle.cancelled:
+                    raise _ReadCancelled from None
+                raise
             finally:
                 container.close()
 
@@ -711,7 +784,7 @@ class LeRobotDatasource(Datasource):
     Example::
 
         import ray
-        from lerobot_datasource import LeRobotDatasource, Partitioning
+        from tools.lerobot_datasource import LeRobotDatasource, Partitioning
 
         source = LeRobotDatasource(root="/data/my_dataset")
         print(source.meta.total_frames, source.meta.video_keys)
@@ -1125,7 +1198,7 @@ def read_lerobot(
     Example::
 
         import ray
-        from lerobot_datasource import read_lerobot, Partitioning
+        from tools.lerobot_datasource import read_lerobot, Partitioning
 
         ds = read_lerobot("/data/my_dataset")
         ds = read_lerobot("gs://bucket/dataset", partitioning=Partitioning.EPISODE)

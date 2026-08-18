@@ -16,13 +16,116 @@ Sections:
   * stage_model_to_local / stage_on_all_nodes (model only -- datasets stream)
 """
 
+import contextlib
+import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import torch
 from ray.data.iterator import NumpyBatchCollateFn
+
+
+# ============================================================================
+# Benign-log suppression
+# ============================================================================
+# lerobot's PI0.5 loader logs two warnings on every load that look like failures
+# and are not. Both are artifacts of how it re-implements from_pretrained:
+#
+#   "Vision embedding key might need handling: ...patch_embedding.weight/.bias"
+#       _fix_pytorch_state_dict_keys warns on any key containing
+#       "patch_embedding" in case a checkpoint needs remapping. Ours does not --
+#       both keys are present in model.safetensors under the names the model
+#       expects, and they load normally.
+#
+#   "Missing keys when loading state dict: 1 keys
+#      - ...paligemma.model.language_model.embed_tokens.weight"
+#       PaliGemma's text config sets tie_word_embeddings=True, so embed_tokens
+#       and lm_head are the SAME tensor and safetensors stores it once, as
+#       lm_head.weight. Loading lm_head fills the embedding table through the
+#       shared storage; the key is absent by design, not lost.
+#
+# Filtered at the root logger (lerobot calls the module-level logging.warning,
+# so records go to root) and only for these exact prefixes -- every other
+# warning still comes through.
+# The tied-embedding report is print()ed rather than logged, so it needs the
+# stdout filter below -- EXCEPT inside a Ray Train worker, where Ray Train v2
+# patches builtins.print to forward through the root logger instead
+# (ray/train/v2/_internal/logging/patch_print.py), which is why these two lines
+# are listed for both filters. Matched exactly, not by prefix: the header
+# carries its "1 keys" count and the bullet its full key name, so a load missing
+# anything ELSE still reports in full instead of being silently swallowed.
+_TIED_EMBED_KEY = (
+    "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+)
+_BENIGN_LEROBOT_PRINTS = (
+    "Missing keys when loading state dict: 1 keys",
+    f"  - {_TIED_EMBED_KEY}",
+)
+
+_BENIGN_LEROBOT_LOG_PREFIXES = (
+    "Vision embedding key might need handling:",
+    *_BENIGN_LEROBOT_PRINTS,
+)
+
+
+class _BenignLerobotFilter(logging.Filter):
+    def filter(self, record):
+        return not record.getMessage().startswith(_BENIGN_LEROBOT_LOG_PREFIXES)
+
+
+def quiet_benign_lerobot_logs():
+    """Drop lerobot's known-benign PI0.5 load warnings. Idempotent."""
+    root = logging.getLogger()
+    for target in (root, *root.handlers):
+        if not any(isinstance(f, _BenignLerobotFilter) for f in target.filters):
+            target.addFilter(_BenignLerobotFilter())
+
+
+class _LineFilterWriter:
+    """Line-buffered stdout proxy that drops an exact set of lines."""
+
+    def __init__(self, stream, drop):
+        self._stream = stream
+        self._drop = drop
+        self._buf = ""
+
+    def write(self, s):
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line not in self._drop:
+                self._stream.write(line + "\n")
+        return len(s)
+
+    def flush(self):
+        if self._buf:
+            if self._buf not in self._drop:
+                self._stream.write(self._buf)
+            self._buf = ""
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def quiet_benign_lerobot_prints():
+    """Suppress lerobot's tied-embedding "Missing keys" report on stdout.
+
+    Scoped to the from_pretrained call. Anything lerobot prints that is not one
+    of the two exact benign lines passes straight through, including tracebacks.
+    """
+    original = sys.stdout
+    proxy = _LineFilterWriter(original, _BENIGN_LEROBOT_PRINTS)
+    sys.stdout = proxy
+    try:
+        yield
+    finally:
+        proxy.flush()
+        sys.stdout = original
 
 
 # ============================================================================
@@ -63,11 +166,22 @@ def load_pi05_policy(pretrained_path):
     that manually here for the 4 action-head modules.
     """
     apply_pi05_attention_mask_patch()
+    quiet_benign_lerobot_logs()
     from lerobot.policies.pi05 import PI05Policy
 
-    policy = PI05Policy.from_pretrained(
-        str(pretrained_path), device="cuda", dtype=torch.float16, train_expert_only=True,
-    )
+    # strict=False: the base checkpoint legitimately omits
+    # paligemma...embed_tokens.weight, which is tied to lm_head.weight (see
+    # quiet_benign_lerobot_logs). Left at the default strict=True, lerobot's
+    # loader raises inside its own try/except and prints
+    #   "Warning: Could not remap state dict keys: Error(s) in loading
+    #    state_dict for PI05Policy: Missing key(s) ..."
+    # -- alarming, but the weights are already copied by then, so it changes
+    # nothing except the log. Say what we mean instead.
+    with quiet_benign_lerobot_prints():
+        policy = PI05Policy.from_pretrained(
+            str(pretrained_path), device="cuda", dtype=torch.float16,
+            train_expert_only=True, strict=False,
+        )
     for p in policy.parameters():
         p.requires_grad = False
     for name, module in policy.model.named_children():
@@ -117,6 +231,14 @@ class NumpyToTorchCollate(NumpyBatchCollateFn):
                 # uint8 -> GPU -> float32, same values as the old CPU-side
                 # .astype(np.float32) (no /255 rescale; the normalizer step
                 # in the preprocessor owns scaling).
+                #
+                # Arrow hands back read-only buffers, and torch.from_numpy on one
+                # warns "The given NumPy array is not writable ... undefined
+                # behavior". Nothing here writes through the tensor -- .to() copies
+                # to the GPU immediately -- but copy the rare read-only batch
+                # rather than leave a warning that invites the reader to wonder.
+                if not arr.flags.writeable:
+                    arr = arr.copy()
                 result[k] = torch.from_numpy(arr).to(self.device).float()
             elif np.issubdtype(arr.dtype, np.integer):
                 result[k] = torch.tensor(arr, dtype=torch.long, device=self.device)
@@ -143,7 +265,7 @@ def build_preprocessor(policy_config, base_dir, dataset_stats, device="cuda"):
         RuntimeError: Expected all tensors to be on the same device, but found
         at least two devices, cuda:0 and cpu! (index_select)
 
-    policy_server.py works around this by re-uploading the batch after
+    tools/policy_server.py works around this by re-uploading the batch after
     preprocessing; overriding the step is cheaper -- it avoids a pointless
     GPU -> CPU -> GPU round trip of both camera streams per step.
     """
@@ -209,17 +331,36 @@ def optimizer_step(policy, optimizer, scaler, scheduler):
 # LR schedule
 # ============================================================================
 def build_lr_scheduler(optimizer, config, num_workers, last_step):
-    """Linear warmup -> cosine decay LR schedule."""
+    """Linear warmup -> cosine decay LR schedule.
+
+    The schedule spans the updates the run will ACTUALLY perform. Sizing it from
+    ``total_rows`` alone, as this did, silently breaks any run that stops at
+    ``max_train_steps``: a 50-batch smoke run at grad_accum=16 makes 3 optimizer
+    updates, while a schedule built for a full 273k-row epoch spends its first
+    854 updates warming up. Those 3 updates then land at ~1e-7 instead of the
+    configured 5e-5, the weights move by ~1e-6 relative -- fp16 noise -- and the
+    "retrained" policy behaves identically to the one it started from.
+    """
     import math
     bs = int(config.get("batch_size", 1))
     ga = int(config.get("grad_accum", 1))
     nepochs = int(config.get("num_epochs", 1))
     rows = int(config.get("total_rows", 10000))
     warm_fr = float(config.get("warmup_frac", 0.1))
+    max_train_steps = config.get("max_train_steps")
 
     rows_per_worker = rows // num_workers
-    total_steps = max(rows_per_worker // (bs * ga), 1) * nepochs
+    if max_train_steps:
+        # max_train_steps counts batches, and one update covers grad_accum of
+        # them. Never fewer than 1 update, or the schedule divides by zero.
+        total_steps = max(int(max_train_steps) // ga, 1)
+    else:
+        total_steps = max(rows_per_worker // (bs * ga), 1) * nepochs
     warmup_steps = int(total_steps * warm_fr)
+
+    # last_step is a batch count (what the train loop tracks); the scheduler
+    # counts updates.
+    last_step = int(last_step) // ga
 
     def lr_lambda(s):
         if s < warmup_steps:
@@ -301,7 +442,7 @@ def make_checkpoint(policy, optimizer, scaler, epoch, step, stats,
                     base_model_repo, camera_rename):
     """Pickle trainable-only state + dataset stats into a Ray Train Checkpoint.
 
-    Stats are included so policy_server.py can rebuild the same preprocessor
+    Stats are included so tools/policy_server.py can rebuild the same preprocessor
     at inference time without re-reading the dataset. base_model_repo and
     camera_rename are saved as breadcrumbs for downstream consumers.
     """

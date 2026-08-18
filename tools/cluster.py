@@ -14,7 +14,7 @@ counts are per GPU.
 
 Usage in a notebook, after `ray.init(...)`:
 
-    import cluster
+    from tools import cluster
     cluster.describe()                       # print the shape + any warnings
     NUM_TRAIN_WORKERS = cluster.train_workers()   # one DDP worker per GPU
     SIM_WORKERS       = cluster.sim_workers()      # one rollout per GPU node
