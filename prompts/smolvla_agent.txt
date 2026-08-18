@@ -1,15 +1,12 @@
-using the physical-ai skill, set up and run a SmolVLA fine-tune, end to end, right now.
+Read AGENT_RULES.md and follow it throughout.
 
-this is a smoke test: I'm validating the pipeline runs prompt-to-checkpoint on this cluster before committing to longer runs. optimize for shortest wall-clock to a verified checkpoint, nothing here needs to train a good policy yet.
+Task: using the physical-ai skill, run a SmolVLA fine-tune end to end, right now.
+This is a smoke test validating prompt-to-checkpoint on this cluster. Optimize
+for shortest wall-clock to a VERIFIED checkpoint; the policy does not need to
+be good.
 
-requirements:
-
-run it in THIS workspace on the GPUs already here. do not submit a separate anyscale job, do not provision new nodes. 
-use whatever GPUs on the current workspace cluster, if the pipeline uses bf16, switch to fp16 autocast with GradScaler instead.
-I'm submitting from an Anyscale workspace, so check my cloud's default compute template actually has GPU workers before relying on auto-select.
-single GPU: num_workers=1, use_gpu=True. do NOT set accelerator_type anywhere.
-fresh RUN_NAME with a timestamp so nothing resumes a stale run.
-50 training steps, enough to see loss move and write a checkpoint.
-reuse everything that already exists: the shared venv on /mnt/cluster_storage, cached model weights, staged dataset. only build or download what's missing. if a validated pipeline already exists in agent_artifacts, run it in place, don't copy it (copies break the uv lockfile) and don't regenerate validated code.
-fail fast on cheap checks: before waiting on anything slow, verify what you just configured actually took effect. read the submit output in full before letting a 10-minute wait be how you discover a config error, if it mentions workspace-managed pip dependencies being injected, stop and fix that first.
-launch it, watch the log, and don't hand back until loss is printing and a checkpoint is written. if anything fails, fix it and rerun; don't stop to ask unless it needs a decision only I can make.
+Job specifics:
+1. 50 training steps, batch size minimal, enough to see loss move.
+2. Per rule 3, detect GPU capability and choose bf16 vs fp16 accordingly.
+3. Per rules 7 and 16: fresh timestamped run name, and hand back only after the
+   checkpoint is written, re-loaded, and its keys printed.
