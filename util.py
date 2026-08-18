@@ -87,10 +87,24 @@ class NumpyToTorchCollate(NumpyBatchCollateFn):
     torch tensors, preserving dtype semantics: integer -> torch.long, bool
     -> torch.bool, everything else -> torch.float32. The ``task`` column
     stays as a Python list of strings (language conditioning).
+
+    ``image_keys`` names the camera columns, which stay **uint8** all the way
+    through Ray Data and are widened to float32 only here, on the GPU. That
+    matters on small nodes: a 256x256x3 frame is 197 KB as uint8 and 786 KB as
+    float32, so casting inside the Ray Data pipeline would quadruple every
+    block held in the object store -- while the datasource's block sizing
+    (``estimated_row_size_bytes``) still assumes uint8, so the streaming
+    executor would under-count its own memory use by 4x and the host OOM
+    killer would take out the raylet. Cast late, on device, instead.
+
+    Without this list the base-class rule would send uint8 images to
+    torch.long (integer -> long), which is 8 bytes per channel value -- worse
+    than the float32 it replaced. Camera columns must be named explicitly.
     """
 
-    def __init__(self, device):
+    def __init__(self, device, image_keys=()):
         self.device = device
+        self.image_keys = set(image_keys)
 
     def __call__(self, batch):
         task = list(batch.pop("task"))
@@ -99,7 +113,12 @@ class NumpyToTorchCollate(NumpyBatchCollateFn):
             arr = np.asarray(v)
             if arr.dtype == object:
                 arr = np.stack([np.asarray(x) for x in v])
-            if np.issubdtype(arr.dtype, np.integer):
+            if k in self.image_keys:
+                # uint8 -> GPU -> float32, same values as the old CPU-side
+                # .astype(np.float32) (no /255 rescale; the normalizer step
+                # in the preprocessor owns scaling).
+                result[k] = torch.from_numpy(arr).to(self.device).float()
+            elif np.issubdtype(arr.dtype, np.integer):
                 result[k] = torch.tensor(arr, dtype=torch.long, device=self.device)
             elif np.issubdtype(arr.dtype, np.bool_):
                 result[k] = torch.tensor(arr, dtype=torch.bool, device=self.device)
@@ -107,6 +126,36 @@ class NumpyToTorchCollate(NumpyBatchCollateFn):
                 result[k] = torch.tensor(arr, dtype=torch.float32, device=self.device)
         result["task"] = task
         return result
+
+
+# ============================================================================
+# Preprocessor construction
+# ============================================================================
+def build_preprocessor(policy_config, base_dir, dataset_stats, device="cuda"):
+    """Build PI0.5's preprocessor pipeline, pinned to `device`.
+
+    The pipeline's last step is a DeviceProcessorStep, and when the pipeline is
+    loaded via `pretrained_path` that step's device comes from the saved
+    preprocessor JSON in `pi05_base` -- which says "cpu". It does NOT inherit
+    policy_config.device. Left alone it drags every batch back off the GPU, so
+    the CUDA model then meets CPU token ids:
+
+        RuntimeError: Expected all tensors to be on the same device, but found
+        at least two devices, cuda:0 and cpu! (index_select)
+
+    policy_server.py works around this by re-uploading the batch after
+    preprocessing; overriding the step is cheaper -- it avoids a pointless
+    GPU -> CPU -> GPU round trip of both camera streams per step.
+    """
+    from lerobot.policies.factory import make_pre_post_processors
+
+    preprocessor, postprocessor = make_pre_post_processors(
+        policy_config,
+        pretrained_path=str(base_dir),
+        dataset_stats=dataset_stats,
+        preprocessor_overrides={"device_processor": {"device": str(device)}},
+    )
+    return preprocessor, postprocessor
 
 
 # ============================================================================
@@ -124,7 +173,7 @@ def truncate_batch(batch, max_len):
 
 
 # ============================================================================
-# Training step helpers — vanilla PyTorch wrapped in autocast
+# Training step helpers: vanilla PyTorch wrapped in autocast
 # ============================================================================
 def train_step(policy, batch, preprocessor, max_len, grad_accum, scaler):
     """One forward + scaled backward. Returns scalar loss value."""
@@ -132,6 +181,11 @@ def train_step(policy, batch, preprocessor, max_len, grad_accum, scaler):
     batch = truncate_batch(batch, max_len)
     batch.pop("task", None)
     batch.pop("task_index", None)
+    # Emitted alongside chunked actions to mark padded timesteps. PI0.5's forward
+    # does not accept it (nothing in lerobot's pi05 or its processors reads
+    # action_is_pad), so drop it here. Kept in the dataset because masking the
+    # loss over padded timesteps is the natural next refinement.
+    batch.pop("action_is_pad", None)
     with torch.autocast("cuda", torch.float16):
         out = policy(batch)
         loss = out.loss if hasattr(out, "loss") else out[0]
@@ -179,6 +233,68 @@ def build_lr_scheduler(optimizer, config, num_workers, last_step):
 
 
 # ============================================================================
+# Action chunking for sim-recorded frames
+# ============================================================================
+def chunk_episode_actions(frames, chunk_size):
+    """Give each frame of ONE episode an ``(chunk_size, action_dim)`` action chunk.
+
+    LIBERO rows get their chunks inside the datasource
+    (``LeRobotReadTask._chunk_action_column``), but sim workers record a single
+    executed action per frame. Both sides must agree, or ``Dataset.union()`` in
+    the closed loop sees two different shapes for ``action`` and training breaks
+    on whichever batch comes from the other source.
+
+    Pass the frames of a single episode, in order -- one trajectory pickle is one
+    episode. Padding repeats the last real action and is flagged in
+    ``action_is_pad``, matching the datasource's convention.
+    """
+    if chunk_size <= 1 or not frames:
+        return frames
+
+    actions = np.stack([np.asarray(f["action"], dtype=np.float32) for f in frames])
+    if actions.ndim != 2:
+        raise ValueError(
+            f"expected one action per frame, got array of shape {actions.shape}; "
+            f"are these frames already chunked?"
+        )
+    n_frames = len(frames)
+    last = n_frames - 1
+    wanted = np.arange(n_frames)[:, None] + np.arange(chunk_size)[None, :]
+    chunks = actions[np.minimum(wanted, last)]
+    is_pad = wanted > last
+
+    out = []
+    for i, frame in enumerate(frames):
+        chunked = dict(frame)
+        chunked["action"] = chunks[i]
+        chunked["action_is_pad"] = is_pad[i]
+        out.append(chunked)
+    return out
+
+
+# ============================================================================
+# Resume sanity check
+# ============================================================================
+def resume_would_skip_training(start_epoch, num_epochs):
+    """True when a restored checkpoint leaves the epoch loop with nothing to do.
+
+    `load_checkpoint` returns `state["epoch"] + 1`, so re-running a completed
+    single-epoch job gives `for epoch in range(1, 1)` -- zero iterations. The
+    loop body never executes, `metrics` is never assigned, no `ray.train.report`
+    happens, and `TorchTrainer.fit()` hands back the PREVIOUS run's checkpoint
+    and metrics. The notebook then prints a plausible loss and a valid
+    checkpoint path for training that did not occur.
+
+    Resuming a finished run is legitimate; silently presenting it as a fresh
+    result is not. Callers use this to say so out loud.
+
+    To actually retrain, either raise `num_epochs`, or give `RunConfig` a new
+    `name` so Ray Train starts a fresh run instead of restoring this one.
+    """
+    return start_epoch >= num_epochs
+
+
+# ============================================================================
 # Checkpoint I/O
 # ============================================================================
 def make_checkpoint(policy, optimizer, scaler, epoch, step, stats,
@@ -223,6 +339,132 @@ def load_checkpoint(checkpoint, policy, optimizer, scaler):
     if "scaler" in state:
         scaler.load_state_dict(state["scaler"])
     return state["epoch"] + 1, state.get("step", 0)
+
+
+# ============================================================================
+# Phase transitions: host-RAM headroom gating
+# ============================================================================
+def node_host_memory(ray_module):
+    """Report (hostname, MemTotal, MemAvailable, Shmem) in MiB for each GPU node."""
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    @ray_module.remote(num_cpus=0)
+    def _mem():
+        import socket
+        d = {}
+        for line in open("/proc/meminfo"):
+            k, v = line.split(":", 1)
+            d[k] = int(v.strip().split()[0]) // 1024
+        return {"host": socket.gethostname(), "total": d["MemTotal"],
+                "available": d["MemAvailable"], "shmem": d.get("Shmem", 0)}
+
+    nodes = [n for n in ray_module.nodes()
+             if n.get("Alive") and n.get("Resources", {}).get("GPU")]
+    return ray_module.get([
+        _mem.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+            node_id=n["NodeID"], soft=False)).remote()
+        for n in nodes
+    ])
+
+
+def wait_for_host_headroom(ray_module, need_mib=17_000, timeout_s=240,
+                           poll_s=10, log_fn=print, require_all=False,
+                           per_gpu=True, num_workers=None):
+    """Give each GPU node a moment to free host RAM before a phase loads PI0.5.
+
+    Loading PI0.5 costs a transient ~16 GB of host RAM per worker even though
+    the loaded policy stays ~3.3 GB resident, because the safetensors state
+    dict is materialized on the host before the weights move to the GPU. A node
+    that has just finished a Ray Train round is still holding plasma and idle
+    spill workers, so this waits for it to settle and reports what it is
+    waiting on.
+
+    Flexible about cluster shape, which is the point:
+
+    * `require_all=False` (default) waits for ANY node to qualify, which is
+      right for a single Ray Serve replica since it lands on one node.
+    * `require_all=True` waits for EVERY GPU node, which is right before Ray
+      Train, since it places one worker per GPU.
+    * `per_gpu=True` (default) scales each node's budget by the workers that
+      will actually land on it, so a 4-GPU node asks for 4x what a single-GPU
+      node does. Pass `per_gpu=False` for a flat per-node budget.
+    * `num_workers` caps that multiplier at the number of workers the run
+      actually requests, so pinning a 4-GPU cluster to 2 workers budgets for 2.
+
+    Returns True once the cluster qualifies; False on timeout (caller decides).
+    """
+    import time
+    gpus_by_host = {}
+    if per_gpu:
+        gpus_by_host = {
+            n.get("NodeManagerHostname"): int(n.get("Resources", {}).get("GPU", 1))
+            for n in ray_module.nodes()
+            if n.get("Alive") and n.get("Resources", {}).get("GPU")
+        }
+
+    def _need(m):
+        workers_here = max(1, gpus_by_host.get(m["host"], 1))
+        if num_workers:
+            workers_here = min(workers_here, max(1, int(num_workers)))
+        return need_mib * workers_here
+
+    deadline = time.time() + timeout_s
+    while True:
+        mem = node_host_memory(ray_module)
+        short = [m for m in mem if m["available"] < _need(m)]
+        ok = (not short) if require_all else (len(short) < len(mem))
+        if mem and ok:
+            scope = "all nodes" if require_all else "at least one node"
+            worst = min(mem, key=lambda m: m["available"] - _need(m))
+            log_fn(f"host headroom OK ({scope}): lowest is {worst['host']} with "
+                   f"{worst['available']} MiB available (need {_need(worst)})")
+            return True
+        for m in short:
+            log_fn(f"  WAITING on {m['host']}: {m['available']} MiB available of "
+                   f"{m['total']} (shmem {m['shmem']} MiB) -- needs {_need(m)}")
+        if time.time() >= deadline:
+            log_fn(f"{len(short)} GPU node(s) still short of the load-spike "
+                   f"budget ({need_mib} MiB per GPU worker) after "
+                   f"{timeout_s}s. Proceeding, but a worker that dies here with "
+                   f"'SYSTEM_ERROR ... connection error code 2' is the host OOM "
+                   f"killer, not a bug in the training code. Idle Ray spill "
+                   f"workers are the usual culprit -- restart the cluster to "
+                   f"clear them, or stop the upstream stage from spilling.")
+            return False
+        time.sleep(poll_s)
+
+
+def release_phase(ray_module, log_fn=print):
+    """Drop local references and ask every GPU node to collect garbage.
+
+    Called between phases (train -> serve -> sim) so the next phase starts
+    without the previous one's plasma and idle spill workers still resident.
+    """
+    import gc
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    gc.collect()
+
+    @ray_module.remote(num_cpus=0)
+    def _gc():
+        import gc as g
+        g.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return True
+
+    nodes = [n for n in ray_module.nodes()
+             if n.get("Alive") and n.get("Resources", {}).get("GPU")]
+    ray_module.get([
+        _gc.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+            node_id=n["NodeID"], soft=False)).remote()
+        for n in nodes
+    ])
+    log_fn(f"released phase state on {len(nodes)} GPU node(s)")
 
 
 # ============================================================================

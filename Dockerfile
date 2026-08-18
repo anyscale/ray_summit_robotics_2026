@@ -16,11 +16,11 @@ ENV DISPLAY=""
 ENV OMNI_KIT_RENDERING_MODE=headless
 # Force EGL over GLX (no X server on Anyscale nodes)
 ENV __EGL_VENDOR_LIBRARY_DIRS=/usr/share/glvnd/egl_vendor.d
-# Vulkan ICD — NVIDIA driver mounts this at runtime
+# Vulkan ICD: NVIDIA driver mounts this at runtime
 ENV VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
 ENV VK_DRIVER_FILES=/etc/vulkan/icd.d/nvidia_icd.json
 # Request all driver capabilities (also injects the graphics device nodes: nvidia-modeset,
-# /dev/dri/renderD*). NOTE: on this platform this is NOT sufficient by itself — the host
+# /dev/dri/renderD*). NOTE: on this platform this is NOT sufficient by itself; the host
 # driver carries no graphics *userspace*, so the NVIDIA container runtime has no graphics libs
 # to mount regardless of this setting. The graphics userspace is baked in explicitly below.
 ENV NVIDIA_DRIVER_CAPABILITIES=all
@@ -65,12 +65,12 @@ RUN mkdir -p /etc/vulkan/icd.d && \
     > /etc/vulkan/icd.d/nvidia_icd.json
 # ---------- NVIDIA graphics userspace (added 2026-07-22) ----------
 # The NVIDIA container runtime injects only COMPUTE driver libs (libcuda, nvidia-ml, ...); the
-# g7e host driver carries no graphics userspace, so libGLX_nvidia.so.0 (the NVIDIA Vulkan ICD),
+# host driver carries no graphics userspace, so libGLX_nvidia.so.0 (the NVIDIA Vulkan ICD),
 # libnvidia-glcore/rtcore/eglcore/... and the GLVND EGL vendor JSON are all absent from the
 # container. Without them Isaac Sim's Vulkan/RTX renderer can't initialize
 # (vkCreateInstance -> ERROR_INCOMPATIBLE_DRIVER) -> all-black frames + PhysX-GPU init hang.
 # Fix: bake the *graphics* userspace from the version-matched (=host kernel driver) .run.
-# The EGL vendor JSON (10_nvidia.json) is essential — the driver's init path goes through GLVND
+# The EGL vendor JSON (10_nvidia.json) is essential; the driver's init path goes through GLVND
 # EGL, and without it registered the init silently fails (VK_ERROR_INITIALIZATION_FAILED).
 # Verified live on g7e.4xlarge / RTX PRO 6000 Blackwell: vulkaninfo then enumerates the GPU.
 ENV NV_DRIVER_VERSION=580.126.09
@@ -183,6 +183,7 @@ RUN python -m pip install --no-cache-dir \
     "termcolor>=2.4,<4" \
     "torchcodec==0.5" \
     "av==15.1.0" \
+    "num2words>=0.5,<0.6" \
     "wandb>=0.24,<0.25" \
     "s3fs>=2024.1" \
     "fsspec[s3]>=2024.1"

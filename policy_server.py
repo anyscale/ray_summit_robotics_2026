@@ -3,8 +3,8 @@ PI0.5 Policy Server via Ray Serve.
 
 Loads the fine-tuned PI0.5 checkpoint produced by the fine-tuning notebook
 (`02_vla_finetuning.ipynb`, written under `/mnt/cluster_storage/...`) and
-serves it behind an HTTP endpoint so Isaac Lab sim workers — running on a
-separate GPU — can query it over the network without ever loading the
+serves it behind an HTTP endpoint so Isaac Lab sim workers, running on a
+separate GPU, can query it over the network without ever loading the
 3.4B-param model themselves.
 
 A standard Ray Serve pattern: a `@serve.deployment` class wrapped in
@@ -20,7 +20,7 @@ Initialization, per replica:
      normalization `stats` saved into state.pkl.
   4. Patch `make_att_2d_masks` (same patch as training).
 
-Request format (pickled dict over HTTP, raw — pre-batch, pre-normalization):
+Request format (pickled dict over HTTP, raw: pre-batch, pre-normalization):
     {
         "observation.images.image":   (H, W, 3) uint8  OR  (3, H, W) float32,
         "observation.images.image2":  (H, W, 3) uint8  OR  (3, H, W) float32,
@@ -176,7 +176,7 @@ class PI05PolicyServer:
         self.policy = policy
 
         # Build the inference preprocessor + postprocessor the same way
-        # training did — via `make_pre_post_processors` with the base model
+        # training did, via `make_pre_post_processors` with the base model
         # dir as pretrained_path. The base model's preprocessor config
         # (normalization modes, feature keys) is what we trained against;
         # building "from scratch" would default to QUANTILES mode and break
@@ -255,7 +255,7 @@ class PI05PolicyServer:
                 # Preprocessor's AddBatchDim wraps a plain str into [str]. Leave as-is.
                 batch["task"] = v
             else:
-                # Pass through unknown keys (defensive — preprocessor may want them).
+                # Pass through unknown keys (defensive: preprocessor may want them).
                 batch[k] = v
 
         return batch
@@ -281,7 +281,7 @@ class PI05PolicyServer:
         actions_post = self.postprocessor(actions)
         actions_np = actions_post.detach().cpu().numpy() if torch.is_tensor(actions_post) else np.asarray(actions_post)
 
-        # Strip the batch dim — sim worker only sent one obs.
+        # Strip the batch dim, the sim worker only sent one obs.
         if actions_np.ndim == 3:
             actions_np = actions_np[0]   # (n_steps, action_dim)
 

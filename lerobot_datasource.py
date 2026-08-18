@@ -25,7 +25,7 @@ Partitioning
 | ``episode``   | one per episode  | small local datasets; maximum      |
 |               |                  | task count regardless of I/O cost  |
 +---------------+------------------+------------------------------------+
-| ``file_group``| one per unique   | **default** — balanced tasks with  |
+| ``file_group``| one per unique   | **default**, balanced tasks with  |
 | *(default)*   | video-file set   | each mp4 opened once per task      |
 +---------------+------------------+------------------------------------+
 | ``chain``     | one per connected| large cloud datasets where         |
@@ -48,7 +48,7 @@ Typical usage::
     ds = read_lerobot("gs://bucket/dataset", partitioning=Partitioning.EPISODE)
     ds = read_lerobot("/data/my_dataset", partitioning=Partitioning.ROW_BLOCK, block_size=1024)
 
-    # Multiple roots — rows from all datasets are interleaved; dataset_index identifies the source.
+    # Multiple roots: rows from all datasets are interleaved; dataset_index identifies the source.
     ds = read_lerobot(["/data/ds1", "/data/ds2"])
     ds = read_lerobot(["gs://bucket/ds1", "gs://bucket/ds2"], partitioning=Partitioning.EPISODE)
 
@@ -320,9 +320,10 @@ class LeRobotReadTask(ReadTask):
         metas_ref: "ray.ObjectRef",
         rows_per_batch: int,
         per_task_row_limit: int | None = None,
+        action_chunk_size: int = 1,
     ) -> None:
         metas: list[LeRobotDatasourceMetadata] = ray.get(metas_ref)
-        # Resolve paths now (no I/O — pure computation) so input_files is
+        # Resolve paths now (no I/O, pure computation) so input_files is
         # populated in BlockMetadata and the result can be reused in _read.
         total_rows = 0
         size_bytes = 0
@@ -349,6 +350,7 @@ class LeRobotReadTask(ReadTask):
         self._metas_ref = metas_ref
         self._segments_resolved = resolved
         self._rows_per_batch = rows_per_batch
+        self._action_chunk_size = int(action_chunk_size)
 
     def _read(self) -> Iterator[pa.Table]:
         """Stream decoded rows as Arrow tables, iterating over all segments."""
@@ -417,6 +419,15 @@ class LeRobotReadTask(ReadTask):
                 with fs.open(path, "rb") as f:
                     pq_table = pq.read_table(f, filters=filters)
 
+                # read_table materializes the whole filtered segment, so the
+                # future actions a chunk needs are already in memory here. Doing
+                # this per segment (rather than per emitted batch) means chunks
+                # never need rows that have not been read yet.
+                if self._action_chunk_size > 1:
+                    pq_table = self._chunk_action_column(
+                        pq_table, self._action_chunk_size,
+                    )
+
                 task_idx_col = pq_table.column("task_index")
                 timestamp_col = pq_table.column("timestamp")
                 ep_idx_col   = pq_table.column("episode_index")
@@ -468,7 +479,7 @@ class LeRobotReadTask(ReadTask):
         """Resolve all file paths needed to read rows ``[start, end)``.
 
         Returns ``(parquet_segs, video_paths, video_start_ts, ep_from_ts)``.
-        No I/O — pure computation from the episodes table and path templates.
+        No I/O, pure computation from the episodes table and path templates.
         """
         start_ep, end_ep = LeRobotReadTask._episodes_for_row_range(meta.episodes, start, end)
         ep_slice = meta.episodes.slice(start_ep, end_ep - start_ep)
@@ -600,6 +611,63 @@ class LeRobotReadTask(ReadTask):
         return pa.table(columns)
 
     @staticmethod
+    def _chunk_action_column(pq_table: pa.Table, chunk_size: int) -> pa.Table:
+        """Replace per-frame ``action`` with an ``(chunk_size, action_dim)`` chunk.
+
+        PI0.5 is an action-*chunking* policy: its config sets
+        ``chunk_size == n_action_steps == 50``, and its flow-matching loss
+        compares ``v_t`` of shape ``[B, chunk, action_dim]`` against ``u_t``
+        derived from the target action. Handing it one action per frame makes
+        ``u_t`` ``[B, action_dim]`` while ``v_t`` stays ``[B, 1, action_dim]``, and
+        ``F.mse_loss`` silently *broadcasts* rather than raising::
+
+            UserWarning: Using a target size (torch.Size([1, 1, 32])) that is
+            different to the input size (torch.Size([1, 32])). This will likely
+            lead to incorrect results due to broadcasting.
+
+        so the model regresses against a spurious axis and never learns chunks.
+
+        Chunks are clipped to the episode: rows are contiguous and ordered within
+        a segment, so episode extents come from ``episode_index`` runs. Past the
+        end of an episode the final real action repeats (the same padding
+        ``LeRobotDataset`` produces via ``delta_timestamps``), and a companion
+        ``action_is_pad`` column marks which timesteps are padding so a caller can
+        mask the loss. Nothing here consumes ``action_is_pad`` yet -- PI0.5's
+        forward does not accept it, so the training loop drops it before the
+        forward pass.
+        """
+        actions = np.asarray(
+            pq_table.column("action").to_pylist(), dtype=np.float32,
+        )
+        if actions.ndim != 2:
+            raise ValueError(
+                f"expected a 2-D (rows, action_dim) action column, got "
+                f"shape {actions.shape}; is it already chunked?"
+            )
+        episodes = np.asarray(pq_table.column("episode_index").to_pylist())
+        n_rows = actions.shape[0]
+
+        # exclusive end index of the episode each row belongs to
+        run_starts = np.flatnonzero(
+            np.concatenate(([True], episodes[1:] != episodes[:-1]))
+        )
+        run_ends = np.concatenate((run_starts[1:], [n_rows]))
+        row_run = np.searchsorted(run_starts, np.arange(n_rows), side="right") - 1
+        last_in_episode = (run_ends[row_run] - 1)[:, None]
+
+        wanted = np.arange(n_rows)[:, None] + np.arange(chunk_size)[None, :]
+        is_pad = wanted > last_in_episode
+        chunks = actions[np.minimum(wanted, last_in_episode)]
+
+        columns: dict[str, Any] = {
+            pq_table.schema.field(i).name: pq_table.column(i)
+            for i in range(pq_table.num_columns)
+        }
+        columns["action"] = ArrowVariableShapedTensorArray.from_numpy(list(chunks))
+        columns["action_is_pad"] = ArrowVariableShapedTensorArray.from_numpy(list(is_pad))
+        return pa.table(columns)
+
+    @staticmethod
     def _next_frame(
         frame_iters: dict[str, Any],
         start: int,
@@ -661,6 +729,7 @@ class LeRobotDatasource(Datasource):
         self,
         root: str | Path | list[str | Path],
         partitioning: Partitioning | str = Partitioning.FILE_GROUP,
+        action_chunk_size: int = 1,
         **kwargs: Any,
     ):
         """
@@ -724,6 +793,15 @@ class LeRobotDatasource(Datasource):
 
         self._partitioning: str = partitioning
         self._slice_kwargs: dict[str, Any] = kwargs
+        # 1 keeps the historical behaviour (one action per row). Set this to the
+        # policy's chunk_size when training an action-chunking policy such as
+        # PI0.5 (chunk_size=50) -- see _chunk_action_column for why feeding a
+        # single action makes the flow-matching loss broadcast instead of match.
+        self._action_chunk_size = int(action_chunk_size)
+        if self._action_chunk_size < 1:
+            raise ValueError(
+                f"action_chunk_size must be >= 1, got {action_chunk_size}"
+            )
 
         logger.info(
             "LeRobotDatasource ready: %d roots, %d total frames, %d cameras %s, mode=%r",
@@ -740,17 +818,17 @@ class LeRobotDatasource(Datasource):
         return self.metas[0]
 
     # ------------------------------------------------------------------
-    # Slicing helpers — called from get_read_tasks to produce row ranges
+    # Slicing helpers, called from get_read_tasks to produce row ranges
     # ------------------------------------------------------------------
 
     @staticmethod
     def _slices_sequential(ds_meta: LeRobotDatasourceMetadata) -> list[tuple[int, int]]:
-        """Single slice spanning all rows — one task total, minimal peak memory."""
+        """Single slice spanning all rows: one task total, minimal peak memory."""
         return [(0, ds_meta.total_frames)]
 
     @staticmethod
     def _slices_by_episode(ds_meta: LeRobotDatasourceMetadata) -> list[tuple[int, int]]:
-        """One slice per episode — maximum task count; same mp4 may be opened by multiple tasks."""
+        """One slice per episode: maximum task count; same mp4 may be opened by multiple tasks."""
         from_indices = ds_meta.episodes.column("_global_from_index").to_pylist()
         to_indices = ds_meta.episodes.column("_global_to_index").to_pylist()
         return list(zip(from_indices, to_indices))
@@ -900,7 +978,7 @@ class LeRobotDatasource(Datasource):
         return sum(m.total_frames * m.estimated_row_size_bytes for m in self.metas) or None
 
     def plan(self, parallelism: int = 0) -> list[dict]:
-        """Return the read plan as a list of task descriptors — no I/O, no Ray objects.
+        """Return the read plan as a list of task descriptors, with no I/O and no Ray objects.
 
         Each entry describes one logical read task::
 
@@ -979,12 +1057,12 @@ class LeRobotDatasource(Datasource):
 
         Steps:
 
-        1. **Slice** — call the appropriate ``_slices_*`` helper (chosen by
+        1. **Slice**: call the appropriate ``_slices_*`` helper (chosen by
            *partitioning* at construction) to get per-root ``(root_idx, start, end)``
            triples; slicers themselves are unchanged and operate per root.
-        2. **Group** — if there are more ranges than *parallelism* allows,
+        2. **Group**: if there are more ranges than *parallelism* allows,
            merge consecutive triples so groups differ in size by at most one.
-        3. **Wrap** — create one :class:`LeRobotReadTask` per group.  Each task
+        3. **Wrap**: create one :class:`LeRobotReadTask` per group.  Each task
            receives its segment list and a shared ``ray.ObjectRef`` to the full
            metadata list; file path resolution and all I/O happen on the worker.
         """
@@ -1006,6 +1084,7 @@ class LeRobotDatasource(Datasource):
                 metas_ref=metas_ref,
                 rows_per_batch=rows_per_batch,
                 per_task_row_limit=per_task_row_limit,
+                action_chunk_size=self._action_chunk_size,
             )
             for entry in task_plan
         ]

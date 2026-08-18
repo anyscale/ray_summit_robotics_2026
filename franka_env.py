@@ -15,7 +15,7 @@ action dims drive panda_joint1..7; the gripper dim is held at zero
 (open). The 8-D proprioceptive state we report (7 arm joints + 1 gripper
 proxy) matches the LIBERO fine-tune's state schema. Even so, LIBERO and
 Isaac-Lift-Cube-Franka differ in scene, control scaling, and coordinate
-conventions, so don't expect task completion — we're showing the
+conventions, so don't expect task completion; we're showing the
 orchestration loop (serve -> sim -> training), not learning Franka
 manipulation.
 
@@ -32,14 +32,81 @@ AppLauncher to dodge IsaacLab issue #4090 (pinocchio pybind11
 std::vector<std::string> bindings get clobbered by Isaac Lab's URDF
 loader).
 """
+import contextlib
+import fcntl
 import os
 import sys
+import time
+from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import numpy as np
 
 
-# Deferred — only set up when the first env is created, to avoid
+# ============================================================================
+# Kit startup serialization
+# ============================================================================
+# Kit resolves its extension tree through per-user cache and registry
+# directories under $HOME. Those are per node, not per process, so when several
+# sim workers on the same node create their app in the same instant they read
+# that tree while it is being written, and come up without it:
+#
+#     ModuleNotFoundError: No module named 'omni.kit.usd'
+#
+# One GPU per sim worker means one worker per node on single-GPU instances, so
+# this only appears once a node carries several GPUs (4 on a g6.12xlarge). The
+# fix is to let one process at a time through startup, which costs a boot in
+# series (~50 s each) and leaves the rollouts themselves fully parallel.
+_KIT_LOCK_PATH = os.environ.get(
+    "ISAAC_KIT_STARTUP_LOCK",
+    "/mnt/local_storage/.isaac_kit_startup.lock"
+    if os.path.isdir("/mnt/local_storage")
+    else "/tmp/.isaac_kit_startup.lock",
+)
+
+
+@contextlib.contextmanager
+def kit_startup_lock(label="", timeout_s=900, poll_s=2.0):
+    """Hold a node-local lock across Kit and USD startup.
+
+    The lock file lives on node-local disk, which is the right scope: the cache
+    being shared is per node. Waiters poll rather than block so they can report
+    progress, and a waiter that reaches `timeout_s` proceeds anyway rather than
+    holding up the round.
+    """
+    path = Path(_KIT_LOCK_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+")
+    held, t0, next_note = False, time.time(), 30.0
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = True
+            break
+        except OSError:
+            waited = time.time() - t0
+            if waited > timeout_s:
+                print(f"[franka_env] {label} startup lock still busy after "
+                      f"{waited:.0f}s; starting anyway", flush=True)
+                break
+            if waited >= next_note:
+                print(f"[franka_env] {label} waiting for another worker to "
+                      f"finish Kit startup ({waited:.0f}s)", flush=True)
+                next_note += 30.0
+            time.sleep(poll_s)
+    if held:
+        print(f"[franka_env] {label} holding Kit startup lock "
+              f"(waited {time.time() - t0:.0f}s)", flush=True)
+    try:
+        yield
+    finally:
+        if held:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            print(f"[franka_env] {label} released Kit startup lock", flush=True)
+        fh.close()
+
+
+# Deferred: only set up when the first env is created, to avoid
 # double-launching Kit if multiple envs are constructed in the same process.
 _APP_LAUNCHED = False
 
@@ -58,7 +125,7 @@ def _launch_isaac_app(headless: bool = True, enable_cameras: bool = True):
     try:
         import pinocchio  # noqa: F401
     except ImportError:
-        # If pinocchio isn't installed the loader probably won't crash —
+        # If pinocchio isn't installed the loader probably won't crash,
         # but log it for diagnostics.
         print("[franka_env] pinocchio not importable; "
               "skipping IsaacLab #4090 workaround", flush=True)
@@ -108,30 +175,35 @@ class LiftCubeFrankaEnv:
         seed: int = 42,
         num_envs: int = 1,
     ):
-        _launch_isaac_app(headless=headless, enable_cameras=True)
-
-        # Imports must come AFTER AppLauncher.
-        import gymnasium as gym
-        import isaaclab_tasks  # noqa: F401  - registers Isaac-* tasks
-        import torch  # noqa: F401          - imported to set CUDA context early
-
         self.task_name = task_name
         self.language_instruction = language_instruction
         self.seed = seed
         self.num_envs = num_envs
         self._step_count = 0
 
-        print(f"[franka_env] Creating {task_name}", flush=True)
-        from isaaclab_tasks.utils import parse_env_cfg
-        env_cfg = parse_env_cfg(
-            task_name,
-            device="cuda:0",
-            num_envs=num_envs,
-            use_fabric=True,
-        )
-        # For video / camera rendering, AppLauncher already enabled the
-        # render path; gym.make with rgb_array gives us frames via env.render().
-        self.env = gym.make(task_name, cfg=env_cfg, render_mode="rgb_array")
+        # Everything that pulls in Kit extensions or opens the USD stage runs
+        # under the node-local lock: app creation, the task registry import, and
+        # gym.make. Stepping the env afterwards needs no lock.
+        with kit_startup_lock(label=f"pid{os.getpid()}"):
+            _launch_isaac_app(headless=headless, enable_cameras=True)
+
+            # Imports must come AFTER AppLauncher.
+            import gymnasium as gym
+            import isaaclab_tasks  # noqa: F401  - registers Isaac-* tasks
+            import torch  # noqa: F401          - imported to set CUDA context early
+
+            print(f"[franka_env] Creating {task_name}", flush=True)
+            from isaaclab_tasks.utils import parse_env_cfg
+            env_cfg = parse_env_cfg(
+                task_name,
+                device="cuda:0",
+                num_envs=num_envs,
+                use_fabric=True,
+            )
+            # For video / camera rendering, AppLauncher already enabled the
+            # render path; gym.make with rgb_array gives us frames via env.render().
+            self.env = gym.make(task_name, cfg=env_cfg, render_mode="rgb_array")
+
         print(f"[franka_env]   obs_space:    {self.env.observation_space}", flush=True)
         print(f"[franka_env]   action_space: {self.env.action_space}", flush=True)
 
@@ -238,7 +310,7 @@ class LiftCubeFrankaEnv:
             row = arr
         elif arr.ndim == 2:
             row = arr[min(step_idx, arr.shape[0] - 1)]
-        elif arr.ndim == 3:  # (B, n_steps, D) — strip batch
+        elif arr.ndim == 3:  # (B, n_steps, D), strip batch
             row = arr[0, min(step_idx, arr.shape[1] - 1)]
         else:
             raise ValueError(f"unexpected action chunk shape {arr.shape}")
