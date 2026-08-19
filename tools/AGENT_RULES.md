@@ -23,9 +23,9 @@ REUSE, DON'T REBUILD
    hf-cache/hub/) and use what's there; only fall back to HF for what genuinely isn't
    mirrored.
 
-   SmolVLA is already mirrored -- both lerobot/smolvla_base and its
-   HuggingFaceTB/SmolVLM2-500M-Video-Instruct backbone, in HF-cache layout, so pointing
-   HF_HOME at a synced copy resolves both offline:
+   SmolVLA is already mirrored. Both lerobot/smolvla_base and its
+   HuggingFaceTB/SmolVLM2-500M-Video-Instruct backbone are there in HF-cache layout, so
+   pointing HF_HOME at a synced copy resolves both offline:
 
        export HF_HOME=/mnt/cluster_storage/hf-cache
        mkdir -p "$HF_HOME/hub"
@@ -35,7 +35,7 @@ REUSE, DON'T REBUILD
          "$HF_HOME/hub" --no-sign-request --quiet
 
    ~2.8 GB. /mnt/cluster_storage is NFS-mounted on every node, so that is ONE sync for the
-   whole cluster -- don't re-stage per node. Skip it when
+   whole cluster. Do not re-stage per node. Skip it when
    $HF_HOME/hub/models--lerobot--smolvla_base/refs/main already exists. Pass HF_HOME (and
    HF_HUB_OFFLINE=1) through the Ray runtime_env env_vars so workers resolve from the
    mirror too.
