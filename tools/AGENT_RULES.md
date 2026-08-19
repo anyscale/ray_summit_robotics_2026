@@ -17,6 +17,28 @@ REUSE, DON'T REBUILD
 4. Reuse what exists: the shared venv on /mnt/cluster_storage, cached model weights,
    staged datasets. Before installing or downloading ANYTHING, check whether it's
    already there and print what you found. Only build or download what's missing.
+4a. Check the S3 mirror before pulling weights from huggingface.co. Course checkpoints are
+   mirrored under s3://anyscale-public-materials-use2/ray_summit_robotics_2026/ so that
+   hundreds of concurrent clusters can't throttle HF. List that prefix (and its
+   hf-cache/hub/) and use what's there; only fall back to HF for what genuinely isn't
+   mirrored.
+
+   SmolVLA is already mirrored -- both lerobot/smolvla_base and its
+   HuggingFaceTB/SmolVLM2-500M-Video-Instruct backbone, in HF-cache layout, so pointing
+   HF_HOME at a synced copy resolves both offline:
+
+       export HF_HOME=/mnt/cluster_storage/hf-cache
+       mkdir -p "$HF_HOME/hub"
+       aws configure set default.s3.max_concurrent_requests 32   # default 10 under-feeds EFS
+       aws s3 sync \
+         s3://anyscale-public-materials-use2/ray_summit_robotics_2026/hf-cache/hub \
+         "$HF_HOME/hub" --no-sign-request --quiet
+
+   ~2.8 GB. /mnt/cluster_storage is NFS-mounted on every node, so that is ONE sync for the
+   whole cluster -- don't re-stage per node. Skip it when
+   $HF_HOME/hub/models--lerobot--smolvla_base/refs/main already exists. Pass HF_HOME (and
+   HF_HUB_OFFLINE=1) through the Ray runtime_env env_vars so workers resolve from the
+   mirror too.
 5. Verify the venv is actually in use before proceeding: which python must resolve
    under /mnt/cluster_storage. If it doesn't, fix the environment before any install.
 6. If a validated pipeline exists in agent_artifacts, run it IN PLACE. Do not copy it
