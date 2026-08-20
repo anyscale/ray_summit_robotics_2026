@@ -195,17 +195,8 @@ loads the rules before it touches the cluster.
 >
 > Install one agent CLI, then the Anyscale skills. Copy and paste as is.
 >
-> **Quick path.** Claude Code is standalone and needs no Node:
->
-> ```bash
-> pip install -U anyscale
-> anyscale login
-> anyscale skills install -p claude-code -p cursor -p codex --accept-terms
-> curl -fsSL https://claude.ai/install.sh | bash   # skip if using codex/cursor
-> ```
->
-> **Using a different agent?** Install its CLI, then run the three `anyscale`
-> commands above:
+> **Install an agent CLI.** Pick one. Claude Code and Cursor are standalone and
+> need no Node:
 >
 > ```bash
 > # Claude Code, standalone, no Node needed
@@ -221,8 +212,16 @@ loads the rules before it touches the cluster.
 > npm install -g @github/copilot
 > ```
 >
-> `anyscale skills install` is what teaches your agent this platform, so run it
-> no matter which CLI you picked.
+> **Then install the skills.** Same three commands whichever CLI you picked:
+>
+> ```bash
+> pip install -U anyscale
+> anyscale login
+> anyscale skills install -p claude-code -p cursor -p codex --accept-terms
+> ```
+>
+> `anyscale skills install` is what teaches your agent this platform, so don't
+> skip it.
 
 ---
 
