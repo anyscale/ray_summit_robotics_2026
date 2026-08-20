@@ -40,12 +40,12 @@ SmolVLA track.
    │ Ray Data│   │  a VLA       │   │ the policy │   │  & evaluate │
    │ stream  │   │  Ray Train   │   │ Ray Serve  │   │ Ray tasks   │
    └─────────┘   └──────────────┘   └────────────┘   └──────┬──────┘
-        ▲                                                    │
-        │                  CLOSE THE LOOP                    │
+        ▲                                                   │
+        │                  CLOSE THE LOOP                   │
         └───────────  filter by reward, union  ◀────────────┘
                               │
             ┌─────────────────┴───────────────────┐
-            ▼                                      ▼
+            ▼                                     ▼
    ┌──────────────────┐                  ┌────────────────────┐
    │  WORLD MODEL     │                  │   DISTILL FOR EDGE │
    │  pre-train at    │  ───────────▶    │  big teacher →     │
@@ -75,7 +75,7 @@ at scale (04).
 ### What goes in
 
 The training data is **LIBERO**, streamed straight from the public S3 mirror by
-`tools/lerobot_datasource.py` — no download step, no local copy. Each episode is a
+`tools/lerobot_datasource.py`: no download step, no local copy. Each episode is a
 language instruction plus two synchronized camera streams, and both views are what
 PI0.5 actually consumes:
 
@@ -116,23 +116,20 @@ hands you the Franka arm actually being driven by the policy you just trained:
 </tr>
 </table>
 
-These are smoke-scale runs — 50 training steps in notebook 02, 100 in notebook 03's
-round-2 retrain — so expect exploratory motion rather than a clean pick. What is being demonstrated is the loop: serve, roll out, filter by
+These are smoke-scale runs (50 training steps in notebook 02, 100 in notebook 03's
+round-2 retrain), so expect exploratory motion rather than a clean pick. What is being demonstrated is the loop: serve, roll out, filter by
 reward, `union()` into the training stream, retrain, and compare under identical
 seeds. See [A note on scope](#a-note-on-scope) for why the motion looks this way.
 
-The notebooks are designed to be read in order, and they cross-reference each
-other. They ship **pre-run:** every notebook has committed outputs, so you can
-read the whole story without a cluster, then re-run any of them on your own.
+The notebooks are designed to be read in order, and they cross-reference each other.
 
-> **A note on the figures and committed outputs.** The diagrams, logs, and cell
-> outputs throughout this course were captured on the **minimum supported
-> configuration** (2 GPUs, one per node) and illustrate the smallest shape the
-> workflow takes. They are not a ceiling: the same code paths scale to larger
-> clusters with no edits: more Ray Train workers as you add GPUs, and more parallel
-> simulators as you add GPU nodes. Expect your own run's
-> worker counts, throughput, and timings to differ from the printed ones
-> accordingly. See [Cluster](#cluster) for exactly what changes with GPU count.
+> **A note on the figures and captured output.** The diagrams, logs, and cell outputs
+> in this course were captured on the **reference configuration**: four T4s on a single
+> `g4dn.12xlarge` with 192 GB of host RAM. That is not a ceiling. The same code paths
+> scale to larger clusters with no edits, adding Ray Train workers as you add GPUs and
+> parallel simulators as you add GPU nodes, so expect your own worker counts, throughput,
+> and timings to differ from the printed ones. See [Cluster](#cluster) for exactly what
+> changes with GPU count.
 
 ---
 
@@ -152,9 +149,21 @@ Same lesson as the rest of the course, arrived at from the other direction: the
 orchestration is config, not code, which is exactly why an agent can drive it.
 
 **The brief lives in [`prompts/smolvla_agent.txt`](./prompts/smolvla_agent.txt).**
-Hand it to your agent as-is once the setup below is done — it states the smoke-test
+Hand it to your agent as-is once the setup below is done. It states the smoke-test
 goal, pins the run to the GPUs already in this workspace, and tells the agent not
 to hand back until loss is printing and a checkpoint is written.
+
+**Ground rules come first.** An agent handed cluster access and no constraints will
+provision its own nodes, rebuild an environment that already works, or hardcode a GPU
+count that holds only on the shape it happened to see. Stating the boundaries before the
+first command is what makes an agent run reproducible, and it is good practice on any
+agent-driven workload rather than a quirk of this course.
+[`tools/AGENT_RULES.md`](./tools/AGENT_RULES.md) is that file here. It pins the work to
+the GPUs already attached, requires hardware to be detected rather than assumed (bf16 on
+Ampere and newer, fp16 with a `GradScaler` on T4), sends the agent to the S3 weight mirror
+before Hugging Face, sets run-naming and cleanup discipline, and defines what counts as
+done. The brief opens with `Read AGENT_RULES.md and follow it throughout`, so the agent
+loads the rules before it touches the cluster.
 
 > ### Setup: install your agent
 >
@@ -199,6 +208,7 @@ to hand back until loss is printing and a checkpoint is written.
 ├── prerequisite_00_ray_data.ipynb                       optional Ray warm-ups
 ├── prerequisite_01_ray_train.ipynb
 ├── tools/          shared Python imported by the notebooks
+│   └── AGENT_RULES.md   ground rules the agent-led track loads first
 ├── prompts/        the agent-led track's brief
 ├── assets/         GIFs and diagrams the notebooks display
 ├── Dockerfile      the cluster image (single source of truth)
@@ -206,7 +216,7 @@ to hand back until loss is printing and a checkpoint is written.
 ```
 
 Everything under `tools/` is imported as a package, so one style works on the
-driver and on every Ray worker alike — Ray puts the `runtime_env` working
+driver and on every Ray worker alike, because Ray puts the `runtime_env` working
 directory (this repo root) on `sys.path`:
 
 ```python
@@ -237,26 +247,82 @@ directly rather than through the package.
 
 ### Cluster
 
-An Anyscale cluster with **2 or 4 GPU workers**, running the image defined in
-[`Dockerfile`](./Dockerfile). The head node is CPU-only; the GPU workers are accessed via Ray.
+An Anyscale cluster running the image defined in [`Dockerfile`](./Dockerfile). The head
+node is CPU-only; the GPU workers are accessed via Ray.
 
-**Supported instance types:** any of these runs the full course:
+| Requirement | Minimum | Set by |
+|---|---|---|
+| GPUs | 2 or 4 | one Ray Train worker per GPU; notebook 03 reserves one for the policy server |
+| VRAM | 16 GB per GPU | PI0.5 (3.4B) fine-tunes in bf16; the reference run is on T4s |
+| **Host RAM** | **48 GB per GPU** | loading PI0.5 spikes ~16 GB of *host* RAM per worker, in 02 and 03 |
 
-| Instance | GPUs per node | GPU | VRAM | Nodes for 2 GPUs | Nodes for 4 GPUs |
+> **Pick the instance on host RAM, not on VRAM.** Every GPU below has VRAM to spare. Host
+> RAM is what decides whether a shape finishes the course, and it is where the currently
+> common 32 GB single-GPU shapes fall short.
+
+#### Instance types
+
+| Instance | GPUs per node | GPU (VRAM) | Host RAM | Per GPU | Runs the full course? |
 |---|---|---|---|---|---|
-| `g4dn.xlarge` | 1 | T4 | 16 GB | 2 | 4 |
-| `g4dn.2xlarge` | 1 | T4 | 16 GB | 2 | 4 |
-| `g5.2xlarge` | 1 | A10G | 24 GB | 2 | 4 |
-| `g6.12xlarge` | 4 | L4 | 24 GB | n/a (one node is already 4) | 1 |
-| `g7.2xlarge` | 1 | Blackwell-class | 24 GB+ | 2 | 4 |
-| `g7e.4xlarge` | 1 | RTX PRO 6000 | 96 GB | 2 | 4 |
+| `g4dn.12xlarge` | 4 | T4 (16 GB) | 192 GB | 48 GB | **Yes**. Reference config; every committed output came from this shape |
+| `g6.12xlarge` | 4 | L4 (24 GB) | 192 GB | 48 GB | **Yes**. Same host shape as the reference |
+| `g7e.4xlarge` | 1 | RTX PRO 6000 (96 GB) | 128 GB | 128 GB | **Yes**. Use 2 or 4 of them |
+| `g5.4xlarge`, `g6.4xlarge` | 1 | A10G / L4 (24 GB) | 64 GB | 64 GB | Clears the budget on paper, **not validated here** |
+| `g4dn.2xlarge`, `g5.2xlarge`, `g7.2xlarge` | 1 | T4 (16 GB) / A10G (24 GB) / RTX PRO 4500 (32 GB) | 32 GB | 32 GB | **No**. 00 to 02 run on a fresh cluster, then 03 is OOM-killed |
+| `g4dn.xlarge` | 1 | T4 (16 GB) | 16 GB | 16 GB | **No**. Under one PI0.5 load; fails in 02 |
 
-So a cluster is 2 or 4 single-GPU nodes, or a single `g6.12xlarge` carrying all 4 GPUs. The
-notebooks treat these identically — with one exception, notebook 03's sim fan-out, which
-counts GPU *nodes* rather than GPUs (see the table below).
+**So: one 4-GPU node, or two-to-four `g7e.4xlarge`.** Earlier versions of this README
+listed the 32 GB single-GPU shapes as running the full course. They do not, and the
+failure is host RAM, not GPU.
 
-**Nothing in this course is pinned to a GPU count, a GPU model, or an instance type.** Every
-worker count is derived from the live cluster at runtime by [`tools/cluster.py`](./cluster.py):
+#### Why 48 GB of host RAM per GPU
+
+* PI0.5's weights are materialized **on the host** before they move to the GPU: a
+  **~16 GB transient spike per worker**, even though the loaded policy then sits at only
+  ~3.3 GB resident.
+* Ray's raylet holds back ~30% of the node for its object store, and a node that has just
+  finished a training round is still holding plasma blocks and idle spill workers.
+* Notebook 03 loads PI0.5 **three times** (round-1 policy server, retrain workers,
+  round-2 policy server), each time on a node that just finished training.
+* On a 32 GB node that leaves **~14–18 GB free against a 17 GB requirement**, and it does
+  not fail cleanly: the host OOM killer SIGKILLs the raylet, the node is marked dead, and
+  the run reports `SYSTEM_ERROR ... connection error code 2`.
+
+`wait_for_host_headroom()` in [`tools/util.py`](./tools/util.py) gates every phase
+transition on 17 GB per GPU worker and logs what it is waiting on, so a squeezed node is
+visible before it is killed.
+
+**Checking a node you already have.** Every notebook's `cluster.describe()` prints
+`N GiB Ray memory` per node, which is roughly 60% of physical RAM. The reference node prints
+`4 x T4, 48 CPU, 115 GiB Ray memory`: a 192 GB host, ~29 GiB of Ray memory per GPU. Under
+~25 GiB per GPU, notebook 03 will not finish.
+
+#### What each notebook needs
+
+Resource use is phased, so the cluster is never over-subscribed whatever its size. Ray
+releases every GPU between phases, and no notebook needs a GPU another is still holding.
+
+| Notebook | What holds a GPU | On 2 GPUs | On 4 GPUs | Host-RAM spike |
+|---|---|---|---|---|
+| 00 overview | nothing (prose and diagrams) | 0 | 0 | none |
+| 01 data pipelines | nothing (Ray Data decodes video on CPU) | 0 | 0 | none (object store capped at 4 GiB) |
+| 02 VLA fine-tune | one Ray Train worker per GPU | 2 | 4 | **17 GB × workers on the node** |
+| 03 sim-eval phase | 1 Serve policy replica + one Isaac Lab rollout per *remaining GPU node* | 1 replica + 1 sim | 1 replica + 1 sim on one 4-GPU node; 1 replica + 3 sims across four 1-GPU nodes | **17 GB on the replica's node** |
+| 03 retrain phase | one Ray Train worker per GPU | 2 | 4 | **17 GB × workers on the node** |
+| 04 world model | one Ray Train worker per GPU | 2 | 4 | none (6-layer ViT-Small V-JEPA) |
+| 05 distillation | one Ray Train worker per GPU | 2 | 4 | none (ResNet-50 teacher, MobileNetV3 student) |
+
+Notebook 03 is the tightest point in the course on both axes. It is also the only one
+whose worker count depends on cluster *shape* rather than GPU count: the policy replica
+reserves one GPU for the whole sim phase, and Isaac Sim boots one Kit runtime per process
+sharing a per-node extension cache, so the fan-out is `min(GPUs − 1, GPU nodes)`. Four
+GPUs on four nodes gives 3 parallel rollouts; the same four GPUs on one node gives 1.
+
+#### How the worker counts are derived
+
+**Nothing in this course is pinned to a GPU count, a GPU model, or an instance type.**
+Every worker count is read from the live cluster at runtime by
+[`tools/cluster.py`](./tools/cluster.py):
 
 | Setting | Derived as | 2 GPUs | 4 GPUs |
 |---|---|---|---|
@@ -265,30 +331,8 @@ worker count is derived from the live cluster at runtime by [`tools/cluster.py`]
 | Effective batch (02) | `batch_size(1) × grad_accum(16) × workers` | 32 | 64 |
 
 Every notebook opens with `cluster.describe()`, which prints the GPU count, GPU model, and
-per-node layout it found, along with the worker counts derived from them. Set `NUM_WORKERS` or
-`SIM_WORKERS` in the environment to pin a run smaller than the cluster.
-
-#### GPUs each notebook uses
-
-Resource use is phased so the cluster is never over-subscribed, whatever its size.
-Ray releases every GPU between phases, so no notebook needs a GPU that another is
-still holding.
-
-| Notebook | What holds a GPU | On 2 GPUs | On 4 GPUs |
-|---|---|---|---|
-| 00 overview | nothing — prose and diagrams | 0 | 0 |
-| 01 data pipelines | nothing — Ray Data decodes video on CPU | 0 | 0 |
-| 02 VLA fine-tune | one Ray Train worker per GPU | 2 | 4 |
-| 03 sim-eval phase | 1 Serve policy replica, plus one Isaac Lab rollout per *remaining GPU node* | 1 replica + 1 sim | 1 replica + 1 sim on one `g6.12xlarge`; 1 replica + 3 sims across four 1-GPU nodes |
-| 03 retrain phase | one Ray Train worker per GPU | 2 | 4 |
-| 04 world model | one Ray Train worker per GPU | 2 | 4 |
-| 05 distillation | one Ray Train worker per GPU | 2 | 4 |
-
-Notebook 03 is the only one whose count depends on cluster *shape* rather than GPU
-count: the policy replica reserves one GPU for the whole sim phase, and Isaac Sim
-boots one Kit runtime per process sharing a per-node extension cache, so the fan-out
-is `min(GPUs − 1, GPU nodes)`. Four GPUs on four nodes gives 3 parallel rollouts;
-the same four GPUs on one node gives 1.
+per-node layout it found, along with the worker counts derived from them. Set `NUM_WORKERS`
+or `SIM_WORKERS` in the environment to pin a run smaller than the cluster.
 
 **No credentials of any kind.** Datasets, the PI0.5 weights, and the PaliGemma tokenizer all
 come from a public S3 mirror (`s3://anyscale-public-materials-use2/ray_summit_robotics_2026/`)
@@ -300,7 +344,7 @@ Gemma Terms of Use; see `GEMMA_NOTICE.txt` at that prefix.)
 
 | Component | Version |
 |-----------|---------|
-| Ray | 2.53.0. & 2.55.0 |
+| Ray | 2.53.0 and 2.55.0 |
 | Python | 3.11 |
 | PyTorch | 2.7.0 + CUDA 12.8 |
 | Isaac Sim | 5.1.0 |
@@ -331,8 +375,9 @@ Two things worth knowing before you build:
   *compute* driver libs, so the Dockerfile bakes the graphics libs Isaac Sim's Vulkan/RTX
   renderer needs from the version-matched driver `.run`. `NV_DRIVER_VERSION` tracks the host
   driver reported by `nvidia-smi --query-gpu=driver_version --format=csv,noheader`.
-- **Isaac Lab is pinned to a tag and the transformers fork to a commit**, so independent builds
-  resolve to the same code instead of tracking a moving branch.
+- **Isaac Lab and the transformers fork are both pinned to a commit** (`ISAACLAB_COMMIT`
+  and the `transformers` git URL), so independent builds resolve to the same code instead
+  of tracking a moving branch.
 
 (No Weights & Biases in the tutorial; metrics are reported through Ray Train. `wandb` is
 installed only because lerobot expects it to be importable.)
