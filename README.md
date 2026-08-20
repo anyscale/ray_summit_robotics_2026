@@ -242,12 +242,6 @@ loads the rules before it touches the cluster.
 └── README.md
 ```
 
-[`SETUP.txt`](./SETUP.txt) is the same agent setup as the box above, written as
-plain text with no Markdown. It exists so the steps can be handed to someone who
-does not have this repo yet: paste it into a message, a slide, or a chat window
-and the commands survive intact. If you edit the setup box, edit this file to
-match.
-
 Everything under `tools/` is imported as a package, so one style works on the
 driver and on every Ray worker alike, because Ray puts the `runtime_env` working
 directory (this repo root) on `sys.path`:
