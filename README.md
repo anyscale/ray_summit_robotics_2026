@@ -121,6 +121,32 @@ round-2 retrain), so expect exploratory motion rather than a clean pick. What is
 reward, `union()` into the training stream, retrain, and compare under identical
 seeds. See [A note on scope](#a-note-on-scope) for why the motion looks this way.
 
+#### What a full epoch already gives you
+
+Train past smoke scale and the motion tightens up. Below is the same pipeline at real
+scale instead of smoke scale: one full epoch of LIBERO (34,000 steps) fine-tuned
+with DDP across 8 A10G GPUs, served behind Ray Serve, then queried over HTTP
+by parallel Isaac Lab simulators dropped in front of the cube. This was run as a
+standalone job, not by stepping through the notebooks; see
+[Instance types](#instance-types) for what the notebooks themselves require.
+Both panels are rollouts from **that same round**, a weaker attempt beside the
+round's best:
+
+<p align="center">
+  <img src="assets/franka_before_after.gif" width="720" alt="Two Isaac Lab Franka rollouts side by side from the same training round, a 0.69-reward attempt beside the round's best at 0.92">
+</p>
+<p align="center">
+  <sub>Episode-total shaped reward on Isaac Lab's lift task: <b>0.69</b> left,
+  <b>0.92</b> right.</sub>
+</p>
+
+That spread is exactly what makes the flywheel turn. A single epoch already
+produces episodes worth learning from, and reward is what separates them:
+episodes clearing the reward threshold are folded back into training, the rest
+are dropped. The policy's own best behavior becomes its next training signal. Successive
+rounds are how the right-hand panel becomes the average case rather than the
+lucky one.
+
 The notebooks are designed to be read in order, and they cross-reference each other.
 
 > **A note on the figures and captured output.** The diagrams, logs, and cell outputs
@@ -391,6 +417,8 @@ Both the LIBERO training data and Isaac Lab's `Isaac-Lift-Cube-Franka-v0` use a
 has *not* seen is this exact setup: Isaac Lab's action/control convention, scene
 and coordinate frame, and camera views (we feed one render into both of PI0.5's
 camera inputs). So in 02/03 expect **exploratory motion, not task success**: we're
-validating the **orchestration loop**, not manipulation skill. Every run here is
-at smoke scale (small step counts); the lesson is that the *same code* scales to
+validating the **orchestration loop**, not manipulation skill. Every run *in the
+notebooks* is at smoke scale (small step counts); the full-epoch clip above is a
+separate run on a larger cluster, shown to make the point that the ceiling is
+training budget rather than the code. The lesson is that the *same code* scales to
 production by changing config, not logic.
