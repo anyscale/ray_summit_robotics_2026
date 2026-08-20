@@ -121,13 +121,13 @@ round-2 retrain), so expect exploratory motion rather than a clean pick. What is
 reward, `union()` into the training stream, retrain, and compare under identical
 seeds. See [A note on scope](#a-note-on-scope) for why the motion looks this way.
 
-#### What a full epoch already gives you
+#### More training buys tighter motion
 
-Train past smoke scale and the motion tightens up. Below is the same pipeline at real
-scale instead of smoke scale: one full epoch of LIBERO (34,000 steps) fine-tuned
-with DDP across 8 A10G GPUs, served behind Ray Serve, then queried over HTTP
-by parallel Isaac Lab simulators dropped in front of the cube. This was run as a
-standalone job, not by stepping through the notebooks; see
+Below is the same pipeline at real scale instead of smoke scale: one full epoch
+of LIBERO (34,000 steps) fine-tuned with DDP across 8 A10G GPUs, served behind
+Ray Serve, then queried over HTTP by parallel Isaac Lab simulators dropped in
+front of the cube. This was run as a standalone job, not by stepping through the
+notebooks; see
 [Instance types](#instance-types) for what the notebooks themselves require.
 Both panels are rollouts from **that same round**, a weaker attempt beside the
 round's best:
