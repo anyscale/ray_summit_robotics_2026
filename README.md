@@ -1,34 +1,34 @@
 # Scaling Physical AI & Robotics Systems with Ray
 
 An end-to-end physical-AI workflow on **Ray + Anyscale**, taught as a series of
-self-contained, runnable notebooks. You stream robotics data, fine-tune a
-Vision-Language-Action (VLA) policy, serve it and evaluate it in simulation,
-close the loop by folding sim trajectories back into training, pre-train a
-**world model** at scale, and finally **distill** a large model into a small
-backbone you could deploy on a robot.
+self-contained, runnable notebooks: stream robotics data, fine-tune a
+Vision-Language-Action (VLA) policy, serve and evaluate it in simulation, fold
+rewarded sim trajectories back into training, pre-train a **world model** at
+scale, and **distill** a large model into a backbone small enough to deploy on a
+robot.
 
 > **Scale up to learn; scale down to deploy.**
 
-The point of the course is the **infrastructure**. The models (PI0.5, V-JEPA,
-ResNet/MobileNet) are the workload; the lesson is how a handful of Ray
-primitives (**Ray Data**, **Ray Train**, **Ray Serve**, and **Ray remote
-tasks**) handle streaming data, distributed training, live serving, and
-parallel simulation on one cluster. Swap in your own models and the
-orchestration code barely changes.
+The subject of the course is the **infrastructure**. The models (PI0.5, V-JEPA,
+ResNet/MobileNet) are the workload; the lesson is how four Ray primitives
+(**Ray Data**, **Ray Train**, **Ray Serve**, and **Ray remote tasks**) handle
+streaming data, distributed training, live serving, and parallel simulation on a
+single cluster. Substitute your own models and the orchestration code is largely
+unchanged.
 
 <p align="center">
   <img src="assets/nb03_cell6.gif" width="760" alt="Ray Serve policy replica on one GPU while Isaac Lab sim workers query it over HTTP, then release their GPUs">
 </p>
 <p align="center">
   <sub>One cluster: a policy server on one GPU, Isaac Lab
-  simulators fanned out on the rest, all of it handed back when the phase ends.</sub>
+  simulators fanned out on the rest, all of it released when the phase ends.</sub>
 </p>
 
 **Start here:** open [`00_overview.ipynb`](./00_overview.ipynb) and read forward.
-There is nothing to install first. The course image carries every dependency, no
-Hugging Face token is needed, and each notebook connects to the running cluster in
-its own first cell. The agent setup further down applies only to the optional
-SmolVLA track.
+Nothing needs installing first. The course image carries every dependency, no
+Hugging Face token is required, and each notebook connects to the running cluster
+in its own first cell. The agent setup below applies only to the optional SmolVLA
+track.
 
 ---
 
@@ -74,10 +74,10 @@ at scale (04).
 
 ### What goes in
 
-The VLA track (01 through 03) trains on **LIBERO**, streamed straight from the
-public S3 mirror by `tools/lerobot_datasource.py`: no download step, no local
-copy. Each episode is a language instruction plus two synchronized camera
-streams, and both views are what PI0.5 actually consumes:
+The VLA track (01 through 03) trains on **LIBERO**, streamed from the public S3
+mirror by `tools/lerobot_datasource.py` with no download step and no local copy.
+Each episode pairs a language instruction with two synchronized camera streams,
+both of which PI0.5 consumes:
 
 <table>
 <tr>
@@ -98,16 +98,15 @@ streams, and both views are what PI0.5 actually consumes:
   decoded on the fly.</sub>
 </p>
 
-The last two notebooks bring their own data, for the same reason their models
-differ: 04 pre-trains the V-JEPA world model on **FMB**, another LeRobot dataset
-read through the same streaming datasource, and 05 distills a ResNet-50 teacher
-into a MobileNetV3 student on **CIFAR-10**. Both stream from the same public
-bucket, so neither adds a download step either.
+Notebooks 04 and 05 use their own datasets: 04 pre-trains V-JEPA on **FMB**,
+another LeRobot dataset read through the same datasource, and 05 distills a
+ResNet-50 teacher into a MobileNetV3 student on **CIFAR-10**. Both stream from
+the same public bucket.
 
 ### What comes out of the loop
 
 Every sim worker saves the episode it rolled out, so each round of notebook 03
-hands you the Franka arm actually being driven by the policy you just trained:
+returns the Franka arm under the policy just trained:
 
 <table>
 <tr>
@@ -122,22 +121,21 @@ hands you the Franka arm actually being driven by the policy you just trained:
 </tr>
 </table>
 
-These are smoke-scale runs (50 training steps in notebook 02, 100 in notebook 03's
-round-2 retrain), so expect exploratory motion rather than a clean pick. What is being demonstrated is the loop: serve, roll out, filter by
-reward, `union()` into the training stream, retrain, and compare under identical
-seeds. See [A note on scope](#a-note-on-scope) for why the motion looks this way.
+These are smoke-scale runs (50 training steps in notebook 02, 100 in notebook
+03's round-2 retrain), so expect exploratory motion rather than a clean pick. The
+demonstration is the loop: serve, roll out, filter by reward, `union()` into the
+training stream, retrain, and compare under identical seeds. See
+[A note on scope](#a-note-on-scope).
 
-#### More rollouts buy better trajectories
+#### More rollouts, better trajectories
 
-Below is the same pipeline at real scale instead of smoke scale: one full epoch
-of LIBERO (34,000 steps) fine-tuned with DDP across 8 A10G GPUs, served behind
-Ray Serve, then queried over HTTP by parallel Isaac Lab simulators dropped in
-front of the cube. This was run as a standalone job, not by stepping through the
-notebooks; see
-[Instance types](#instance-types) for what the notebooks themselves require.
-Every panel below is a rollout from **that same round** against frozen weights.
-What changes along the row is not the policy, it is how many rollouts you
-collected before picking one:
+The figure below is the same pipeline at production scale: one full epoch of
+LIBERO (34,000 steps) fine-tuned with DDP across 8 A10G GPUs, served behind Ray
+Serve, and queried over HTTP by parallel Isaac Lab simulators. It was run as a
+standalone job rather than through the notebooks; see
+[Instance types](#instance-types) for what the notebooks require. Every panel is
+a rollout from that round against frozen weights, so what varies along the row is
+not the policy but how many rollouts were collected before selecting one:
 
 <p align="center">
   <img src="assets/franka_progress.gif" width="860" alt="Six Isaac Lab Franka rollouts from one training round, labeled best-of-1 through best-of-126, with a log-scale curve of best reward against rollouts collected rising from 0.681 to 1.042">
@@ -145,18 +143,14 @@ collected before picking one:
 <p align="center">
   <sub>Episode-total shaped reward on Isaac Lab's lift task, as the conservative
   (10th-percentile) best of N rollouts: <b>0.681</b> from a single rollout,
-  <b>1.042</b> from 126. Each panel is that round's best-so-far at its point on
-  the curve.</sub>
+  <b>1.042</b> from 126.</sub>
 </p>
 
-That curve is what makes the flywheel turn. One epoch of training already
-produces episodes worth learning from, and reward is what separates them:
-episodes clearing the reward threshold are folded back into training, the rest
-are dropped. Sampling wider raises the quality of what survives the filter, so
-the fan-out in notebook 03 is a *training-data* decision and not only an eval
-one. It is also why the rollouts are plain Ray tasks: they are independent, so
-more GPU nodes buys more of this curve at the same wall-clock, and the policy's
-own best behavior becomes its next training signal.
+Sampling wider raises the quality of what survives the reward filter, which makes
+the notebook 03 fan-out a training-data decision rather than an evaluation one
+alone. Rollouts are independent, so they run as plain Ray tasks: additional GPU
+nodes extend the curve at the same wall-clock, and the policy's best behavior
+becomes its next training signal.
 
 #### The same idea on a real arm
 
@@ -167,57 +161,53 @@ the table to move a piece into.
   <a href="assets/so101.mp4"><img src="assets/so101_poster.jpg" width="660" alt="An SO-101 arm working a heap of candy on a table, a red wrapper out at the near corner of a square taped in red - click to play the full clip"></a>
 </p>
 <p align="center">
-  <sub>▶ <a href="assets/so101.mp4"><b>Play the clip</b></a> (57 s, uncut). GitHub will
-  not autoplay an MP4 inline, so the still is a link.</sub>
+  <sub>▶ <a href="assets/so101.mp4"><b>Play the clip</b></a> (57 s, uncut). GitHub does
+  not render MP4 inline, so the still is a link.</sub>
 </p>
 
 It works the heap and gets a wrapper out to the square, then stalls once the
 candy is in a deep bowl. More rollouts in sim should make it better, for the same
 reason the curve above climbs.
 
-The notebooks are designed to be read in order, and they cross-reference each other.
+The notebooks are designed to be read in order and cross-reference each other.
 
-> **A note on the figures and captured output.** The diagrams, logs, and cell outputs
-> in this course were captured on the **reference configuration**: four T4s on a single
-> `g4dn.12xlarge` with 192 GB of host RAM. That is not a ceiling. The same code paths
-> scale to larger clusters with no edits, adding Ray Train workers as you add GPUs and
-> parallel simulators as you add GPU nodes, so expect your own worker counts, throughput,
-> and timings to differ from the printed ones. See [Cluster](#cluster) for exactly what
-> changes with GPU count.
+> **On figures and captured output.** The diagrams, logs, and cell outputs in this
+> course were captured on the **reference configuration**: four T4s on a single
+> `g4dn.12xlarge` with 192 GB of host RAM. The same code paths scale to larger
+> clusters without edits, adding Ray Train workers as GPUs are added and parallel
+> simulators as GPU nodes are added, so worker counts, throughput, and timings will
+> differ from the printed ones. See [Cluster](#cluster) for what changes with GPU
+> count.
 
 ---
 
 ## Agent-led track: SmolVLA fine-tuning
 
-Running alongside the notebooks is an **agent-led** exercise. Instead of stepping
-through cells yourself, you point a coding agent at Anyscale and have it fine-tune
-**SmolVLA**, a compact VLA policy, on the same LeRobot data this course streams.
+An optional exercise runs alongside the notebooks. Rather than stepping through
+cells, point a coding agent at Anyscale and have it fine-tune **SmolVLA**, a
+compact VLA policy, on the same LeRobot data the course streams. The agent picks
+the compute, writes the job config, launches it, watches the logs, and reports
+the result; `anyscale skills install` in the box below is what gives it the
+Anyscale platform skills to do so. The lesson is the same one reached from the
+other direction: the orchestration is config rather than code, which is why an
+agent can drive it.
 
-The agent does the work you would otherwise do by hand: pick the compute, write
-the job config, launch it, watch the logs, and report back what it got. That is
-what `anyscale skills install` in the box below is for. It gives whichever
-agent you installed the Anyscale platform skills, so it knows how to build a
-Ray Train workload, submit it, and read the result.
+**The brief is [`prompts/smolvla_agent.txt`](./prompts/smolvla_agent.txt).** Hand
+it to your agent as-is once setup is complete. It states the smoke-test goal,
+pins the run to the GPUs already in this workspace, and requires that the agent
+not return until loss is printing and a checkpoint is written.
 
-Same lesson as the rest of the course, arrived at from the other direction: the
-orchestration is config, not code, which is exactly why an agent can drive it.
-
-**The brief lives in [`prompts/smolvla_agent.txt`](./prompts/smolvla_agent.txt).**
-Hand it to your agent as-is once the setup below is done. It states the smoke-test
-goal, pins the run to the GPUs already in this workspace, and tells the agent not
-to hand back until loss is printing and a checkpoint is written.
-
-**Ground rules come first.** An agent handed cluster access and no constraints will
-provision its own nodes, rebuild an environment that already works, or hardcode a GPU
-count that holds only on the shape it happened to see. Stating the boundaries before the
-first command is what makes an agent run reproducible, and it is good practice on any
-agent-driven workload rather than a quirk of this course.
-[`tools/AGENT_RULES.md`](./tools/AGENT_RULES.md) is that file here. It pins the work to
-the GPUs already attached, requires hardware to be detected rather than assumed (bf16 on
-Ampere and newer, fp16 with a `GradScaler` on T4), sends the agent to the S3 weight mirror
-before Hugging Face, sets run-naming and cleanup discipline, and defines what counts as
-done. The brief opens with `Read AGENT_RULES.md and follow it throughout`, so the agent
-loads the rules before it touches the cluster.
+**Ground rules come first.** An agent given cluster access without constraints
+will provision its own nodes, rebuild a working environment, or hardcode a GPU
+count valid only for the shape it happened to observe.
+[`tools/AGENT_RULES.md`](./tools/AGENT_RULES.md) sets those boundaries: it pins
+the work to the GPUs already attached, requires hardware to be detected rather
+than assumed (bf16 on Ampere and newer, fp16 with a `GradScaler` on T4), directs
+the agent to the S3 weight mirror before Hugging Face, sets run-naming and
+cleanup discipline, and defines what counts as done. The brief opens with
+`Read AGENT_RULES.md and follow it throughout`, so the rules load before the
+agent touches the cluster. Stating boundaries before the first command is good
+practice on any agent-driven workload, not a quirk of this course.
 
 > ### Setup: install your agent
 >
@@ -248,8 +238,8 @@ loads the rules before it touches the cluster.
 > anyscale skills install -p claude-code -p cursor -p codex --accept-terms
 > ```
 >
-> `anyscale skills install` is what teaches your agent this platform, so don't
-> skip it.
+> `anyscale skills install` is what teaches your agent this platform. It is
+> required.
 
 ---
 
@@ -263,15 +253,15 @@ loads the rules before it touches the cluster.
 ├── tools/          shared Python imported by the notebooks
 │   └── AGENT_RULES.md   ground rules the agent-led track loads first
 ├── prompts/        the agent-led track's brief
-├── assets/         GIFs and diagrams the notebooks display
+├── assets/         figures and clips shown by the README and notebooks
 ├── Dockerfile      the cluster image (single source of truth)
 ├── SETUP.txt       the agent-install steps as plain text, for sharing
 └── README.md
 ```
 
-Everything under `tools/` is imported as a package, so one style works on the
-driver and on every Ray worker alike, because Ray puts the `runtime_env` working
-directory (this repo root) on `sys.path`:
+Everything under `tools/` is imported as a package, so one import style works on
+the driver and on every Ray worker: Ray places the `runtime_env` working
+directory (this repo root) on `sys.path`.
 
 ```python
 from tools import cluster, util
@@ -279,7 +269,7 @@ from tools.lerobot_datasource import LeRobotDatasource
 from tools.policy_server import PI05PolicyServer
 ```
 
-`tools/sim_worker.py` is the one exception: it runs as a standalone subprocess
+`tools/sim_worker.py` is the one exception. It runs as a standalone subprocess
 (`python -u tools/sim_worker.py`), so it imports its sibling `franka_env`
 directly rather than through the package.
 
@@ -310,8 +300,8 @@ node is CPU-only; the GPU workers are accessed via Ray.
 | VRAM | 16 GB per GPU | PI0.5 (3.4B) fine-tunes in bf16; the reference run is on T4s |
 | **Host RAM** | **48 GB per GPU** | loading PI0.5 spikes ~16 GB of *host* RAM per worker, in 02 and 03 |
 
-> **Pick the instance on host RAM, not on VRAM.** Every GPU below has VRAM to spare. Host
-> RAM is what decides whether a shape finishes the course, and it is where the currently
+> **Pick the instance on host RAM, not on VRAM.** Every GPU below has VRAM to
+> spare. Host RAM decides whether a shape finishes the course, and it is where the
 > common 32 GB single-GPU shapes fall short.
 
 #### Instance types
@@ -325,9 +315,8 @@ node is CPU-only; the GPU workers are accessed via Ray.
 | `g4dn.2xlarge`, `g5.2xlarge`, `g7.2xlarge` | 1 | T4 (16 GB) / A10G (24 GB) / RTX PRO 4500 (32 GB) | 32 GB | 32 GB | **No**. 00 to 02 run on a fresh cluster, then 03 is OOM-killed |
 | `g4dn.xlarge` | 1 | T4 (16 GB) | 16 GB | 16 GB | **No**. Under one PI0.5 load; fails in 02 |
 
-**So: one 4-GPU node, or two-to-four `g7e.4xlarge`.** Earlier versions of this README
-listed the 32 GB single-GPU shapes as running the full course. They do not, and the
-failure is host RAM, not GPU.
+**Use one 4-GPU node, or two to four `g7e.4xlarge`.** The 32 GB single-GPU shapes
+do not complete the course, and the failure is host RAM rather than GPU.
 
 #### Why 48 GB of host RAM per GPU
 
@@ -338,17 +327,17 @@ failure is host RAM, not GPU.
   finished a training round is still holding plasma blocks and idle spill workers.
 * Notebook 03 loads PI0.5 **three times** (round-1 policy server, retrain workers,
   round-2 policy server), each time on a node that just finished training.
-* On a 32 GB node that leaves **~14–18 GB free against a 17 GB requirement**, and it does
-  not fail cleanly: the host OOM killer SIGKILLs the raylet, the node is marked dead, and
-  the run reports `SYSTEM_ERROR ... connection error code 2`.
+* On a 32 GB node that leaves **~14–18 GB free against a 17 GB requirement**, and the
+  failure is not clean: the host OOM killer SIGKILLs the raylet, the node is marked dead,
+  and the run reports `SYSTEM_ERROR ... connection error code 2`.
 
 `wait_for_host_headroom()` in [`tools/util.py`](./tools/util.py) gates every phase
 transition on 17 GB per GPU worker and logs what it is waiting on, so a squeezed node is
 visible before it is killed.
 
 **Checking a node you already have.** Every notebook's `cluster.describe()` prints
-`N GiB Ray memory` per node, which is roughly 60% of physical RAM. The reference node prints
-`4 x T4, 48 CPU, 115 GiB Ray memory`: a 192 GB host, ~29 GiB of Ray memory per GPU. Under
+`N GiB Ray memory` per node, roughly 60% of physical RAM. The reference node prints
+`4 x T4, 48 CPU, 115 GiB Ray memory`: a 192 GB host, ~29 GiB of Ray memory per GPU. Below
 ~25 GiB per GPU, notebook 03 will not finish.
 
 #### What each notebook needs
@@ -366,11 +355,11 @@ releases every GPU between phases, and no notebook needs a GPU another is still 
 | 04 world model | one Ray Train worker per GPU | 2 | 4 | none (6-layer ViT-Small V-JEPA) |
 | 05 distillation | one Ray Train worker per GPU | 2 | 4 | none (ResNet-50 teacher, MobileNetV3 student) |
 
-Notebook 03 is the tightest point in the course on both axes. It is also the only one
-whose worker count depends on cluster *shape* rather than GPU count: the policy replica
-reserves one GPU for the whole sim phase, and Isaac Sim boots one Kit runtime per process
-sharing a per-node extension cache, so the fan-out is `min(GPUs − 1, GPU nodes)`. Four
-GPUs on four nodes gives 3 parallel rollouts; the same four GPUs on one node gives 1.
+Notebook 03 is the tightest point in the course on both axes, and the only one whose
+worker count depends on cluster *shape* rather than GPU count: the policy replica reserves
+one GPU for the whole sim phase, and Isaac Sim boots one Kit runtime per process sharing a
+per-node extension cache, so the fan-out is `min(GPUs − 1, GPU nodes)`. Four GPUs on four
+nodes gives 3 parallel rollouts; the same four GPUs on one node gives 1.
 
 #### How the worker counts are derived
 
@@ -388,13 +377,14 @@ Every notebook opens with `cluster.describe()`, which prints the GPU count, GPU 
 per-node layout it found, along with the worker counts derived from them. Set `NUM_WORKERS`
 or `SIM_WORKERS` in the environment to pin a run smaller than the cluster.
 
-**No credentials of any kind.** Datasets, the PI0.5 weights, and the PaliGemma tokenizer all
-come from the public `anyscale-public-materials-use2` bucket read unsigned: LIBERO, the
+**No credentials of any kind.** Datasets, the PI0.5 weights, and the PaliGemma tokenizer
+are read unsigned from the public `anyscale-public-materials-use2` bucket: LIBERO, the
 CIFAR-10 copy, and every checkpoint under
 `s3://anyscale-public-materials-use2/ray_summit_robotics_2026/`, and notebook 04's FMB
 dataset under `s3://anyscale-public-materials-use2/lerobot/lerobot/fmb`. The notebooks run
-with `HF_HUB_OFFLINE=1`, so no Hugging Face token is needed at run time or build time. (`google/paligemma-3b-pt-224` is redistributed under the
-Gemma Terms of Use; see `GEMMA_NOTICE.txt` at that prefix.)
+with `HF_HUB_OFFLINE=1`, so no Hugging Face token is needed at run time or build time.
+(`google/paligemma-3b-pt-224` is redistributed under the Gemma Terms of Use; see
+`GEMMA_NOTICE.txt` at that prefix.)
 
 ### Tested configuration
 
@@ -408,24 +398,23 @@ Gemma Terms of Use; see `GEMMA_NOTICE.txt` at that prefix.)
 | lerobot | 0.4.3 (`--no-deps`) |
 | transformers | `huggingface/transformers@dcddb97` (patched fork, pinned commit) |
 
-**Why the patched transformers fork?** PI0.5's checkpoint stores Gemma
-layernorm parameters under a different key layout than mainline `transformers
->= 4.57`, and `PI05Pytorch.__init__` aborts unless `transformers.models.siglip.check`
-exists, a symbol only in the fork.
+**Why the patched transformers fork?** PI0.5's checkpoint stores Gemma layernorm
+parameters under a different key layout than mainline `transformers >= 4.57`, and
+`PI05Pytorch.__init__` aborts unless `transformers.models.siglip.check` exists, a
+symbol only in the fork.
 
 **Why `lerobot --no-deps`?** lerobot's `rerun-sdk` dependency requires
-`numpy >= 2`, which breaks Isaac Sim's compiled ABI. Install `--no-deps` and
-pin `numpy>=1.26,<2`.
+`numpy >= 2`, which breaks Isaac Sim's compiled ABI. Install `--no-deps` and pin
+`numpy>=1.26,<2`.
 
 **Why `TORCHDYNAMO_DISABLE=1`?** PI0.5 calls `torch.compile` internally; the
 worker nodes have no C compiler, so dynamo falls back to eager cleanly.
 
 ### Cluster image (Dockerfile)
 
-The image is defined by [`Dockerfile`](./Dockerfile) in this directory, which is the single
-source of truth; build that file as-is.
-
-Two things worth knowing before you build:
+The image is defined by [`Dockerfile`](./Dockerfile) in this directory, which is
+the single source of truth; build that file as-is. Two things are worth knowing
+before you build:
 
 - **The NVIDIA graphics-userspace block is required.** The container runtime injects only
   *compute* driver libs, so the Dockerfile bakes the graphics libs Isaac Sim's Vulkan/RTX
@@ -435,8 +424,8 @@ Two things worth knowing before you build:
   and the `transformers` git URL), so independent builds resolve to the same code instead
   of tracking a moving branch.
 
-(No Weights & Biases in the tutorial; metrics are reported through Ray Train. `wandb` is
-installed only because lerobot expects it to be importable.)
+There is no Weights & Biases in the tutorial; metrics are reported through Ray
+Train, and `wandb` is installed only because lerobot expects it to be importable.
 
 ---
 
@@ -444,11 +433,11 @@ installed only because lerobot expects it to be importable.)
 
 Both the LIBERO training data and Isaac Lab's `Isaac-Lift-Cube-Franka-v0` use a
 **Franka Panda**, so the action and state dimensions line up cleanly. What PI0.5
-has *not* seen is this exact setup: Isaac Lab's action/control convention, scene
-and coordinate frame, and camera views (we feed one render into both of PI0.5's
-camera inputs). So in 02/03 expect **exploratory motion, not task success**: we're
-validating the **orchestration loop**, not manipulation skill. Every run *in the
-notebooks* is at smoke scale (small step counts); the full-epoch figure above is a
-separate run on a larger cluster, shown to make the point that the ceiling is
-training and rollout budget rather than the code. The lesson is that the *same code*
-scales to production by changing config, not logic.
+has *not* seen is this exact setup: Isaac Lab's action and control convention,
+its scene and coordinate frame, and its camera views (one render is fed into both
+of PI0.5's camera inputs). Expect **exploratory motion rather than task success**
+in 02 and 03; what is being validated is the **orchestration loop**, not
+manipulation skill. Every run in the notebooks is at smoke scale, and the
+full-epoch figure above comes from a separate run on a larger cluster, included to
+show that the ceiling is training and rollout budget rather than the code. The
+same code scales to production by changing config, not logic.
