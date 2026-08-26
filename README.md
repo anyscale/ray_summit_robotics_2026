@@ -74,10 +74,10 @@ at scale (04).
 
 ### What goes in
 
-The training data is **LIBERO**, streamed straight from the public S3 mirror by
-`tools/lerobot_datasource.py`: no download step, no local copy. Each episode is a
-language instruction plus two synchronized camera streams, and both views are what
-PI0.5 actually consumes:
+The VLA track (01 through 03) trains on **LIBERO**, streamed straight from the
+public S3 mirror by `tools/lerobot_datasource.py`: no download step, no local
+copy. Each episode is a language instruction plus two synchronized camera
+streams, and both views are what PI0.5 actually consumes:
 
 <table>
 <tr>
@@ -97,6 +97,12 @@ PI0.5 actually consumes:
   <code>observation.images.image2</code> (wrist). 273,465 frames across 37 file groups,
   decoded on the fly.</sub>
 </p>
+
+The last two notebooks bring their own data, for the same reason their models
+differ: 04 pre-trains the V-JEPA world model on **FMB**, another LeRobot dataset
+read through the same streaming datasource, and 05 distills a ResNet-50 teacher
+into a MobileNetV3 student on **CIFAR-10**. Both stream from the same public
+bucket, so neither adds a download step either.
 
 ### What comes out of the loop
 
@@ -121,7 +127,7 @@ round-2 retrain), so expect exploratory motion rather than a clean pick. What is
 reward, `union()` into the training stream, retrain, and compare under identical
 seeds. See [A note on scope](#a-note-on-scope) for why the motion looks this way.
 
-#### More training buys tighter motion
+#### More rollouts buy better trajectories
 
 Below is the same pipeline at real scale instead of smoke scale: one full epoch
 of LIBERO (34,000 steps) fine-tuned with DDP across 8 A10G GPUs, served behind
@@ -129,23 +135,54 @@ Ray Serve, then queried over HTTP by parallel Isaac Lab simulators dropped in
 front of the cube. This was run as a standalone job, not by stepping through the
 notebooks; see
 [Instance types](#instance-types) for what the notebooks themselves require.
-Both panels are rollouts from **that same round**, a weaker attempt beside the
-round's best:
+Every panel below is a rollout from **that same round** against frozen weights.
+What changes along the row is not the policy, it is how many rollouts you
+collected before picking one:
 
 <p align="center">
-  <img src="assets/franka_before_after.gif" width="720" alt="Two Isaac Lab Franka rollouts side by side from the same training round, a 0.69-reward attempt beside the round's best at 0.92">
+  <img src="assets/franka_progress.gif" width="860" alt="Six Isaac Lab Franka rollouts from one training round, labeled best-of-1 through best-of-126, with a log-scale curve of best reward against rollouts collected rising from 0.681 to 1.042">
 </p>
 <p align="center">
-  <sub>Episode-total shaped reward on Isaac Lab's lift task: <b>0.69</b> left,
-  <b>0.92</b> right.</sub>
+  <sub>Episode-total shaped reward on Isaac Lab's lift task, as the conservative
+  (10th-percentile) best of N rollouts: <b>0.681</b> from a single rollout,
+  <b>1.042</b> from 126. Each panel is that round's best-so-far at its point on
+  the curve.</sub>
 </p>
 
-That spread is exactly what makes the flywheel turn. A single epoch already
+That curve is what makes the flywheel turn. One epoch of training already
 produces episodes worth learning from, and reward is what separates them:
 episodes clearing the reward threshold are folded back into training, the rest
-are dropped. The policy's own best behavior becomes its next training signal. Successive
-rounds are how the right-hand panel becomes the average case rather than the
-lucky one.
+are dropped. Sampling wider raises the quality of what survives the filter, so
+the fan-out in notebook 03 is a *training-data* decision and not only an eval
+one. It is also why the rollouts are plain Ray tasks: they are independent, so
+more GPU nodes buys more of this curve at the same wall-clock, and the policy's
+own best behavior becomes its next training signal.
+
+#### Why this happens in a simulator at all
+
+Here is the same shape of task on real hardware: an **SO-101** arm, a bowl of
+candy, and a square taped on the table to put a piece into.
+
+<p align="center">
+  <img src="assets/so101.gif" width="360" alt="An SO-101 arm reaching over a bowl of candy on a hotel table, an empty square taped beside it, not completing the pick">
+</p>
+<p align="center">
+  <sub>Trying its best. The square is still empty.</sub>
+</p>
+
+Almost nothing above survives contact with that table. One arm produces one
+trajectory at a time, in real time, so the 126 rollouts behind the curve would be
+an afternoon of supervised attempts instead of minutes of parallel Ray tasks.
+There is no reward function on a hotel table, so there is nothing to filter on
+without a human watching and labelling every attempt. A knocked-over bowl changes
+the scene for every attempt after it, and the reset is somebody walking over. The
+simulator is what makes the loop turn at all: reward comes for free, episodes are
+independent, the scene resets exactly, and the fan-out is bounded by GPUs rather
+than by patience.
+
+The real arm is still the destination, which is what notebook 05 distills a
+policy small enough for. It is just not where the policy should be doing its
+learning.
 
 The notebooks are designed to be read in order, and they cross-reference each other.
 
@@ -361,9 +398,11 @@ per-node layout it found, along with the worker counts derived from them. Set `N
 or `SIM_WORKERS` in the environment to pin a run smaller than the cluster.
 
 **No credentials of any kind.** Datasets, the PI0.5 weights, and the PaliGemma tokenizer all
-come from a public S3 mirror (`s3://anyscale-public-materials-use2/ray_summit_robotics_2026/`)
-read unsigned, and the notebooks run with `HF_HUB_OFFLINE=1`, so no Hugging Face token is
-needed at run time or build time. (`google/paligemma-3b-pt-224` is redistributed under the
+come from the public `anyscale-public-materials-use2` bucket read unsigned: LIBERO, the
+CIFAR-10 copy, and every checkpoint under
+`s3://anyscale-public-materials-use2/ray_summit_robotics_2026/`, and notebook 04's FMB
+dataset under `s3://anyscale-public-materials-use2/lerobot/lerobot/fmb`. The notebooks run
+with `HF_HUB_OFFLINE=1`, so no Hugging Face token is needed at run time or build time. (`google/paligemma-3b-pt-224` is redistributed under the
 Gemma Terms of Use; see `GEMMA_NOTICE.txt` at that prefix.)
 
 ### Tested configuration
@@ -418,7 +457,7 @@ has *not* seen is this exact setup: Isaac Lab's action/control convention, scene
 and coordinate frame, and camera views (we feed one render into both of PI0.5's
 camera inputs). So in 02/03 expect **exploratory motion, not task success**: we're
 validating the **orchestration loop**, not manipulation skill. Every run *in the
-notebooks* is at smoke scale (small step counts); the full-epoch clip above is a
+notebooks* is at smoke scale (small step counts); the full-epoch figure above is a
 separate run on a larger cluster, shown to make the point that the ceiling is
-training budget rather than the code. The lesson is that the *same code* scales to
-production by changing config, not logic.
+training and rollout budget rather than the code. The lesson is that the *same code*
+scales to production by changing config, not logic.

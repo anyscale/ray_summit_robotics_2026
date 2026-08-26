@@ -2,14 +2,20 @@
 
 No notebook hardcodes a GPU count or an instance type. Every worker count is
 derived from the live cluster at runtime, so the same notebooks run unchanged
-on any of the supported shapes:
+on any of the validated shapes:
 
-    2 GPUs  = 2 x g4dn.2xlarge / g5.2xlarge / g7.2xlarge   (1 GPU per node)
-    4 GPUs  = 4 x those                                     (1 GPU per node)
-    4 GPUs  = 1 x g6.12xlarge                               (4 L4s on ONE node)
+    4 GPUs    = 1 x g4dn.12xlarge   (4 T4s on ONE node -- the reference config)
+    4 GPUs    = 1 x g6.12xlarge     (4 L4s on ONE node)
+    2-4 GPUs  = 2-4 x g7e.4xlarge   (1 GPU per node)
 
-That last row is why this module reports GPUs *per node* as well as the total:
-model staging and host-memory budgeting are per node, while train and sim worker
+GPU count is not the binding constraint -- *host* RAM is. Notebook 03 needs
+~48 GB of host RAM per GPU, so the common 32 GB single-GPU shapes
+(g4dn.2xlarge, g5.2xlarge, g7.2xlarge) get through 00-02 on a fresh cluster and
+are then OOM-killed in 03. Pick the instance on host RAM; see "Instance types"
+in the README for the full table.
+
+That is also why this module reports GPUs *per node* as well as the total: model
+staging and host-memory budgeting are per node, while train and sim worker
 counts are per GPU.
 
 Usage in a notebook, after `ray.init(...)`:
