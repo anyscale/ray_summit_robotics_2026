@@ -158,31 +158,37 @@ one. It is also why the rollouts are plain Ray tasks: they are independent, so
 more GPU nodes buys more of this curve at the same wall-clock, and the policy's
 own best behavior becomes its next training signal.
 
-#### Why this happens in a simulator at all
+#### Sim is where the attempts come from
 
-Here is the same shape of task on real hardware: an **SO-101** arm, a bowl of
-candy, and a square taped on the table to put a piece into.
+Here is the same shape of task on real hardware: an **SO-101** arm, a heap of
+candy, and a square taped on the table to move a piece into.
 
 <p align="center">
-  <img src="assets/so101.gif" width="360" alt="An SO-101 arm reaching over a bowl of candy on a hotel table, an empty square taped beside it, not completing the pick">
+  <a href="assets/so101.mp4"><img src="assets/so101_poster.jpg" width="660" alt="An SO-101 arm working a heap of candy on a table, a red wrapper out at the near corner of a square taped in red - click to play the full clip"></a>
 </p>
 <p align="center">
-  <sub>Trying its best. The square is still empty.</sub>
+  <sub>▶ <a href="assets/so101.mp4"><b>Play the clip</b></a> (57 s, uncut). GitHub will
+  not autoplay an MP4 inline, so the still is a link.</sub>
 </p>
 
-Almost nothing above survives contact with that table. One arm produces one
-trajectory at a time, in real time, so the 126 rollouts behind the curve would be
-an afternoon of supervised attempts instead of minutes of parallel Ray tasks.
-There is no reward function on a hotel table, so there is nothing to filter on
-without a human watching and labelling every attempt. A knocked-over bowl changes
-the scene for every attempt after it, and the reset is somebody walking over. The
-simulator is what makes the loop turn at all: reward comes for free, episodes are
-independent, the scene resets exactly, and the fan-out is bounded by GPUs rather
-than by patience.
+It starts well. On the flat layout the arm gets right down into the heap and a
+wrapper comes out to the taped square: the task is decomposed correctly, the
+approach is sane, the target is understood. Then the candy goes into a deep
+glass bowl and the same policy reaches exactly the right place and comes up
+empty, over and over. The intent is there. What is missing is the precision to
+find a purchase among wrappers that slide out from under the gripper.
 
-The real arm is still the destination, which is what notebook 05 distills a
-policy small enough for. It is just not where the policy should be doing its
-learning.
+That gap is a practice problem, and practice is the one thing a real arm cannot
+hand you cheaply. One arm gives one attempt at a time, in real time, with a human
+resetting the scene and judging what happened. The 126 rollouts behind the curve
+above are minutes of parallel Ray tasks and a reward number that arrives for
+free. Run the bowl variant in sim, sample wide, keep the episodes that clear the
+threshold, `union()` them back into training, and this is the arm that gets good
+at it.
+
+The real arm is the destination, which is what notebook 05 distills a policy
+small enough for. Simulation is just the cheapest place to earn the attempts it
+takes to get there.
 
 The notebooks are designed to be read in order, and they cross-reference each other.
 

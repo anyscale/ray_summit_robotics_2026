@@ -19,6 +19,3 @@ mlruns/
 # Ray / Anyscale artifacts
 /tmp/
 ray_results/
-
-# Source video for assets/so101.gif -- 24 MB, kept locally, not shipped
-assets/*.mp4
