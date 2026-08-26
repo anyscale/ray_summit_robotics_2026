@@ -158,10 +158,10 @@ one. It is also why the rollouts are plain Ray tasks: they are independent, so
 more GPU nodes buys more of this curve at the same wall-clock, and the policy's
 own best behavior becomes its next training signal.
 
-#### Sim is where the attempts come from
+#### The same idea on a real arm
 
-Here is the same shape of task on real hardware: an **SO-101** arm, a heap of
-candy, and a square taped on the table to move a piece into.
+An **SO-101** running a deployed policy: a heap of candy, and a square taped on
+the table to move a piece into.
 
 <p align="center">
   <a href="assets/so101.mp4"><img src="assets/so101_poster.jpg" width="660" alt="An SO-101 arm working a heap of candy on a table, a red wrapper out at the near corner of a square taped in red - click to play the full clip"></a>
@@ -171,24 +171,9 @@ candy, and a square taped on the table to move a piece into.
   not autoplay an MP4 inline, so the still is a link.</sub>
 </p>
 
-It starts well. On the flat layout the arm gets right down into the heap and a
-wrapper comes out to the taped square: the task is decomposed correctly, the
-approach is sane, the target is understood. Then the candy goes into a deep
-glass bowl and the same policy reaches exactly the right place and comes up
-empty, over and over. The intent is there. What is missing is the precision to
-find a purchase among wrappers that slide out from under the gripper.
-
-That gap is a practice problem, and practice is the one thing a real arm cannot
-hand you cheaply. One arm gives one attempt at a time, in real time, with a human
-resetting the scene and judging what happened. The 126 rollouts behind the curve
-above are minutes of parallel Ray tasks and a reward number that arrives for
-free. Run the bowl variant in sim, sample wide, keep the episodes that clear the
-threshold, `union()` them back into training, and this is the arm that gets good
-at it.
-
-The real arm is the destination, which is what notebook 05 distills a policy
-small enough for. Simulation is just the cheapest place to earn the attempts it
-takes to get there.
+It works the heap and gets a wrapper out to the square, then stalls once the
+candy is in a deep bowl. More rollouts in sim should make it better, for the same
+reason the curve above climbs.
 
 The notebooks are designed to be read in order, and they cross-reference each other.
 
